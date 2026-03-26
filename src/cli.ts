@@ -29,7 +29,7 @@ import { Command } from "commander";
 import kleur from "kleur";
 import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { extractCookies, parseCookieString, type CookieSource } from "./lib/cookies.js";
 import { XhsClient, XhsApiError } from "./lib/client.js";
 import { analyzeViral, formatViralAnalysis } from "./lib/analyze.js";
