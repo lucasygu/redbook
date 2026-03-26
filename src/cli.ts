@@ -27,9 +27,9 @@
 
 import { Command } from "commander";
 import kleur from "kleur";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { extractCookies, parseCookieString, type CookieSource } from "./lib/cookies.js";
 import { XhsClient, XhsApiError } from "./lib/client.js";
 import { analyzeViral, formatViralAnalysis } from "./lib/analyze.js";
@@ -76,6 +76,32 @@ function addJsonOption(cmd: Command): Command {
   return cmd.option("--json", "Output as JSON");
 }
 
+function loadEnvFile(): void {
+  // Walk up from cwd looking for .env (stops at filesystem root)
+  let dir = process.cwd();
+  while (true) {
+    const envPath = join(dir, ".env");
+    if (existsSync(envPath)) {
+      const lines = readFileSync(envPath, "utf-8").split(/\r?\n/);
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) continue;
+        const eqIdx = trimmed.indexOf("=");
+        if (eqIdx === -1) continue;
+        const key = trimmed.slice(0, eqIdx).trim();
+        const value = trimmed.slice(eqIdx + 1).trim();
+        if (key && !(key in process.env)) {
+          process.env[key] = value;
+        }
+      }
+      return;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return; // reached root
+    dir = parent;
+  }
+}
+
 async function getClient(cookieSource: string, chromeProfile?: string, cookieString?: string): Promise<XhsClient> {
   if (cookieString) {
     const cookies = parseCookieString(cookieString);
@@ -89,6 +115,17 @@ async function getClient(cookieSource: string, chromeProfile?: string, cookieStr
     console.error(kleur.dim("Using manual cookie string."));
     return new XhsClient(cookies);
   }
+
+  // Try env vars (from .env or shell environment)
+  loadEnvFile();
+  const envA1 = process.env.XHS_COOKIE_A1;
+  const envSession = process.env.XHS_COOKIE_WEB_SESSION;
+  if (envA1 && envSession) {
+    const cookies = parseCookieString(`a1=${envA1}; web_session=${envSession}`);
+    console.error(kleur.dim("Using cookies from environment variables (XHS_COOKIE_A1 + XHS_COOKIE_WEB_SESSION)."));
+    return new XhsClient(cookies);
+  }
+
   const cookies = await extractCookies(cookieSource as CookieSource, chromeProfile);
   return new XhsClient(cookies);
 }
@@ -220,6 +257,16 @@ readCmd.action(async (url, opts) => {
       }
     } else {
       result = await client.getNoteFromHtml(noteId, xsecToken ?? "");
+    }
+
+    // Warn when result is empty and xsec_token was missing
+    const isEmpty = !result || (typeof result === "object" && Object.keys(result as object).length === 0);
+    if (isEmpty && !xsecToken) {
+      console.error(kleur.yellow(
+        "Note returned empty. This usually means the request needs an xsec_token.\n" +
+        "Tip: use a full URL with xsec_token from search results or the browser, e.g.:\n" +
+        `  redbook read "https://www.xiaohongshu.com/explore/${noteId}?xsec_token=TOKEN"`
+      ));
     }
 
     if (opts.json) {
