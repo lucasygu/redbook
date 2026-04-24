@@ -632,3 +632,7 @@ This tool uses unofficial/private APIs. Xiaohongshu may change or block these AP
 ## License
 
 MIT
+
+## Download History
+
+[![Download History](https://skill-history.com/chart/lucasygu/redbook.svg)](https://skill-history.com/lucasygu/redbook)
