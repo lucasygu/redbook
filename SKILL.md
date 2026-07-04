@@ -35,7 +35,7 @@ Use the `redbook` CLI to search notes, read content, analyze creators, automate 
 ```
 /redbook search "AI编程"              # Search notes
 /redbook read <url>                   # Read a note
-/redbook user <userId>                # Creator profile
+/redbook user <profileUrl>            # Creator profile
 /redbook analyze <userId>             # Full creator analysis (profile + posts)
 ```
 
@@ -46,8 +46,8 @@ Use the `redbook` CLI to search notes, read content, analyze creators, automate 
 | Search notes | `redbook search "keyword" --json` |
 | Read a note | `redbook read <url> --json` |
 | Get comments | `redbook comments <url> --json --all` |
-| Creator profile | `redbook user <userId> --json` |
-| Creator's posts | `redbook user-posts <userId> --json` |
+| Creator profile | `redbook user <userId-or-profileUrl> --json` |
+| Creator's posts | `redbook user-posts <userId-or-profileUrl> --json` |
 | Browse feed | `redbook feed --json` |
 | Search hashtags | `redbook topics "keyword" --json` |
 | Analyze viral note | `redbook analyze-viral <url> --json` |
@@ -716,7 +716,7 @@ All state lives under one job directory — default `research/xhs/<job-slug>/` i
 | `manifest.md` | Human-readable plan + progress (checkmark per done item) — the recovery checkpoint, updated every tick |
 | `SUMMARY.md` | Final synthesis, written once the queue drains |
 
-**Seeding the queue:** the cheap list endpoints (`search`, `feed`, `user-posts` — no `xsec_token` cost) are how you *build* the queue, not part of the paced loop. Run a `search`/`feed` up front, extract each `webUrl`, and write one `read`/`analyze-viral` item per note into `queue.jsonl`. Then the loop drains the expensive detail-reads at the Steady pace. Always carry the fresh `webUrl` (with token) as the item `arg` — tokens expire, so don't queue bare noteIds (see [xsec_token](#xsec_token--required-for-reading--sharing-notes)).
+**Seeding the queue:** the cheap list endpoints (`search`, `feed`, and `user-posts` with a fresh profile URL/token) are how you *build* the queue, not part of the paced loop. Run a `search`/`feed` up front, extract each note `webUrl`, and write one `read`/`analyze-viral` item per note into `queue.jsonl`. Then the loop drains the expensive detail-reads at the Steady pace. Always carry the fresh `webUrl` (with token) as the item `arg` — tokens expire, so don't queue bare noteIds (see [xsec_token](#xsec_token--required-for-reading--sharing-notes)). For creator queues, prefer a profile URL containing `xsec_token`; bare userIds may return `code=-1`.
 
 ### One tick = one note
 
@@ -831,22 +831,22 @@ redbook comments "https://www.xiaohongshu.com/explore/abc123" --json
 redbook comments "https://www.xiaohongshu.com/explore/abc123" --all --json
 ```
 
-### `redbook user <userId>`
+### `redbook user <userId|profileUrl>`
 
 Get a creator's profile — nickname, bio, follower count, note count, likes received.
 
 ```bash
-redbook user "5a1234567890abcdef012345" --json
+redbook user "https://www.xiaohongshu.com/user/profile/5a1234567890abcdef012345?xsec_token=...&xsec_source=pc_search" --json
 ```
 
-The userId is the hex string from the creator's profile URL.
+Accepts a bare userId or a full profile URL. If a bare userId returns `code=-1`, use a fresh profile URL containing `xsec_token`, or pass `--xsec-token <token> --xsec-source pc_search`.
 
-### `redbook user-posts <userId>`
+### `redbook user-posts <userId|profileUrl>`
 
 List all notes posted by a creator. Returns titles, URLs, likes, timestamps.
 
 ```bash
-redbook user-posts "5a1234567890abcdef012345" --json
+redbook user-posts "https://www.xiaohongshu.com/user/profile/5a1234567890abcdef012345?xsec_token=...&xsec_source=pc_search" --json
 ```
 
 ### `redbook feed`
@@ -1063,7 +1063,7 @@ redbook feed --global --json            # global home feed
 The web signing (x-s/x-t) algorithm is **identical** across both — only the host + cookie domain differ. `--cookie-source` / `--chrome-profile` still apply.
 
 **Known gaps on `--global`** (as of the port):
-- `user-posts` / `user` (a specific user's public info) return `code -1` — these user-scoped GET endpoints need an `xsec_token` (same trend on mainland). To list your *own* posts today, read them off your profile page HTML.
+- `user-posts` / `user` may need a fresh profile `xsec_token`; pass a full profile URL or `--xsec-token` if a bare userId returns `code -1`.
 - `health` (note throttle levels) needs creator-dashboard cookies; log into the RedNote creator dashboard first.
 
 ---
@@ -1108,8 +1108,9 @@ redbook read "<webUrl from search result>" --json
 
 **For agents:** Prefer `webUrl` from the response. When only a bare noteId is available, search first to obtain a fresh token, then use the returned `webUrl`.
 
-**Commands that need xsec_token:** `read`, `comments`, `analyze-viral`
-**Commands that do NOT need xsec_token:** `search`, `user`, `user-posts`, `feed`, `whoami`, `topics`
+**Commands that need note xsec_token:** `read`, `comments`, `analyze-viral`
+**Commands that may need profile xsec_token:** `user`, `user-posts`
+**Commands that do NOT need xsec_token:** `search`, `feed`, `whoami`, `topics`
 
 ### Chinese Number Formats in API Responses
 

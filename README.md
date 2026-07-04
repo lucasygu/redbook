@@ -66,8 +66,8 @@ redbook comments https://www.xiaohongshu.com/explore/abc123 --all
 redbook feed
 
 # 查看博主信息
-redbook user <userId>
-redbook user-posts <userId>
+redbook user "<profileUrl>"
+redbook user-posts "<profileUrl>"
 
 # 搜索话题标签
 redbook topics "Claude Code"
@@ -123,8 +123,8 @@ redbook post --title "测试" --body "..." --images img.png --private
 | `search <关键词>` | 搜索笔记 |
 | `read <url>` | 阅读单篇笔记 |
 | `comments <url>` | 获取笔记评论 |
-| `user <userId>` | 查看用户资料 |
-| `user-posts <userId>` | 列出用户所有笔记 |
+| `user <userId\|profileUrl>` | 查看用户资料 |
+| `user-posts <userId\|profileUrl>` | 列出用户所有笔记 |
 | `feed` | 获取推荐页内容 |
 | `post` | 发布图文笔记（易触发验证码，详见下方说明） |
 | `topics <关键词>` | 搜索话题/标签 |
@@ -149,6 +149,15 @@ redbook post --title "测试" --body "..." --images img.png --private
 | `--chrome-profile <名称>` | Chrome 配置文件目录名（如 "Profile 1"），默认自动检测 | 自动 |
 | `--cookie-string <cookies>` | 手动传入 Cookie 字符串：`"a1=值; web_session=值"`（从 Chrome DevTools 复制） | 无 |
 | `--json` | JSON 格式输出 | `false` |
+
+### 用户主页选项
+
+`user` 和 `user-posts` 可以接受完整主页 URL，例如 `https://www.xiaohongshu.com/user/profile/<id>?xsec_token=...&xsec_source=pc_search`。如果只有用户 ID，但接口返回 `code=-1`，请从搜索结果或浏览器地址栏复制带 `xsec_token` 的主页 URL，或手动传入：
+
+```bash
+redbook user "<userId>" --xsec-token "<token>" --xsec-source pc_search --json
+redbook user-posts "<userId>" --xsec-token "<token>" --xsec-source pc_search --json
+```
 
 ### 搜索选项
 
@@ -261,7 +270,7 @@ npm install -g puppeteer-core marked
 ```
 /redbook search "AI编程"                        # 搜索笔记
 /redbook read <url>                             # 阅读笔记
-/redbook user <userId>                          # 查看博主
+/redbook user <profileUrl>                      # 查看博主
 /redbook analyze-viral <url>                    # 分析爆款笔记
 ```
 
@@ -383,8 +392,8 @@ redbook comments https://www.xiaohongshu.com/explore/abc123 --all
 redbook feed
 
 # Look up a creator
-redbook user <userId>
-redbook user-posts <userId>
+redbook user "<profileUrl>"
+redbook user-posts "<profileUrl>"
 
 # Search hashtags
 redbook topics "Claude Code"
@@ -439,8 +448,8 @@ redbook post --title "测试" --body "..." --images img.png --private
 | `search <keyword>` | Search notes by keyword |
 | `read <url>` | Read a note by URL |
 | `comments <url>` | Get comments on a note |
-| `user <userId>` | Get user profile info |
-| `user-posts <userId>` | List a user's posted notes |
+| `user <userId\|profileUrl>` | Get user profile info |
+| `user-posts <userId\|profileUrl>` | List a user's posted notes |
 | `feed` | Get homepage feed |
 | `post` | Publish an image note (captcha-prone, see below) |
 | `topics <keyword>` | Search for topics/hashtags |
@@ -469,6 +478,15 @@ redbook post --title "测试" --body "..." --images img.png --private
 | `--json` | Output as JSON | `false` |
 
 > **Global RedNote users:** if you're logged into the international **RedNote** app (`rednote.com`, not mainland `xiaohongshu.com`), add `--global` to every command. The two are separate backends with separate sessions — without `--global` you'll get `guest` / `登录已过期`. The signing algorithm is identical; only the API host (`webapi.rednote.com`) and cookie domain (`.rednote.com`) differ.
+
+### User Profile Options
+
+`user` and `user-posts` accept full profile URLs such as `https://www.xiaohongshu.com/user/profile/<id>?xsec_token=...&xsec_source=pc_search`. If a bare user ID returns `code=-1`, copy a fresh profile URL from search results or the browser address bar, or pass the token explicitly:
+
+```bash
+redbook user "<userId>" --xsec-token "<token>" --xsec-source pc_search --json
+redbook user-posts "<userId>" --xsec-token "<token>" --xsec-source pc_search --json
+```
 
 ### Search Options
 
@@ -581,7 +599,7 @@ Installs automatically as a Claude Code skill. Use `/redbook` in Claude Code:
 ```
 /redbook search "AI编程"                        # Search notes
 /redbook read <url>                             # Read a note
-/redbook user <userId>                          # Creator profile
+/redbook user <profileUrl>                      # Creator profile
 /redbook analyze-viral <url>                    # Analyze a viral note
 ```
 

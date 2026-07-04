@@ -8,8 +8,8 @@
  *   redbook search "Claude Code" --cookie-source chrome --json
  *   redbook read <url> --cookie-source chrome --json
  *   redbook comments <url> --cookie-source chrome --json
- *   redbook user <user-id> --cookie-source chrome --json
- *   redbook user-posts <user-id> --cookie-source chrome --json
+ *   redbook user <user-id-or-profile-url> --cookie-source chrome --json
+ *   redbook user-posts <user-id-or-profile-url> --cookie-source chrome --json
  *   redbook feed --cookie-source chrome --json
  *   redbook post --title "..." --body "..." --images img1.jpg --cookie-source chrome
  *   redbook topics "keyword" --cookie-source chrome

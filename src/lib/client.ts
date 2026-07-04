@@ -161,7 +161,11 @@ export class XhsClient {
     try {
       data = JSON.parse(text);
     } catch {
-      throw new XhsApiError(`Non-JSON response: ${text.substring(0, 200)}`);
+      throw new XhsApiError(
+        `Non-JSON response: ${text.substring(0, 200)}`,
+        res.status,
+        text
+      );
     }
 
     if (data.success) {
@@ -227,14 +231,23 @@ export class XhsClient {
       xsec_source: options.xsecSource ?? "",
     };
 
-    try {
-      return await this.mainApiGet("/api/sns/web/v2/user_posted", params);
-    } catch (err) {
-      if (err instanceof XhsApiError && err.code === -1) {
-        return this.mainApiGet("/api/sns/web/v1/user_posted", params);
+    const endpoints = this.platform.id === "rednote"
+      ? ["/api/sns/web/v1/user_posted"]
+      : ["/api/sns/web/v2/user_posted", "/api/sns/web/v1/user_posted"];
+
+    for (const [idx, endpoint] of endpoints.entries()) {
+      try {
+        return await this.mainApiGet(endpoint, params);
+      } catch (err) {
+        const canFallback =
+          idx < endpoints.length - 1
+          && err instanceof XhsApiError
+          && (err.code === -1 || err.code === 404);
+        if (!canFallback) throw err;
       }
-      throw err;
     }
+
+    throw new XhsApiError("No user-posted endpoint configured");
   }
 
   async searchNotes(
