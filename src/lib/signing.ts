@@ -392,7 +392,7 @@ function weightedChoice<T>(options: T[], weights: number[]): T {
   return options[options.length - 1];
 }
 
-function generateFingerprint(cookies: Record<string, string>, userAgent: string): Record<string, unknown> {
+function generateFingerprint(cookies: Record<string, string>, userAgent: string, signLocation: string = "https://www.xiaohongshu.com/explore"): Record<string, unknown> {
   const cookieString = Object.entries(cookies)
     .map(([k, v]) => `${k}=${v}`)
     .join("; ");
@@ -486,7 +486,7 @@ function generateFingerprint(cookies: Record<string, string>, userAgent: string)
     x65: "0",
     x66: {
       referer: "",
-      location: "https://www.xiaohongshu.com/explore",
+      location: signLocation,
       frame: 0,
     },
     x67: "1|0",
@@ -634,7 +634,8 @@ export function signMainApi(
   cookies: Record<string, string>,
   params?: Record<string, string | number | string[]>,
   payload?: Record<string, unknown>,
-  timestamp?: number
+  timestamp?: number,
+  signLocation?: string
 ): SignHeaders {
   const a1 = cookies.a1;
   if (!a1) throw new Error("Missing 'a1' in cookies");
@@ -667,7 +668,7 @@ export function signMainApi(
   const xs = XYS_PREFIX + customBase64Encode(signatureJson);
 
   // Build x-s-common
-  const fingerprint = generateFingerprint(cookies, USER_AGENT);
+  const fingerprint = generateFingerprint(cookies, USER_AGENT, signLocation);
   const b1 = generateB1(fingerprint);
   const x9 = crc32JsInt(b1);
   const xsCommonStruct = { ...XSCOMMON_TEMPLATE, x5: a1, x8: b1, x9 };

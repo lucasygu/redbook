@@ -1035,7 +1035,36 @@ redbook post --title "测试" --body "..." --images img.png --private --json
 All commands accept:
 - `--cookie-source <browser>`: `chrome` (default), `safari`, `firefox`
 - `--chrome-profile <name>`: Chrome profile directory name (e.g., "Profile 1"). Auto-discovered if omitted.
+- `--platform <name>`: `xhs` (default, mainland xiaohongshu.com) or `rednote` (global rednote.com)
+- `--global`: shorthand for `--platform rednote`
 - `--json`: Output as JSON
+
+---
+
+## Mainland Xiaohongshu vs Global RedNote
+
+XHS runs **two separate backends that do NOT share sessions or cookies**:
+
+| | Mainland (default) | Global |
+|---|---|---|
+| App / site | 小红书 / `xiaohongshu.com` | RedNote / `rednote.com` |
+| API host | `edith.xiaohongshu.com` | `webapi.rednote.com` |
+| Cookie domain | `.xiaohongshu.com` | `.rednote.com` |
+| Select with | (default) | `--global` or `--platform rednote` |
+
+If you are logged into the **global RedNote** app (common outside mainland China — the account that went viral as "RedNote" / "TikTok refugees"), you **must** pass `--global`, or every call returns `guest` / `登录已过期 (-100)` because the CLI is talking to the wrong backend with the wrong cookies.
+
+```bash
+redbook whoami --global                 # confirms you're logged into RedNote
+redbook search "AI" --global --json     # search the global backend
+redbook feed --global --json            # global home feed
+```
+
+The web signing (x-s/x-t) algorithm is **identical** across both — only the host + cookie domain differ. `--cookie-source` / `--chrome-profile` still apply.
+
+**Known gaps on `--global`** (as of the port):
+- `user-posts` / `user` (a specific user's public info) return `code -1` — these user-scoped GET endpoints need an `xsec_token` (same trend on mainland). To list your *own* posts today, read them off your profile page HTML.
+- `health` (note throttle levels) needs creator-dashboard cookies; log into the RedNote creator dashboard first.
 
 ---
 

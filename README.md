@@ -464,7 +464,11 @@ redbook post --title "测试" --body "..." --images img.png --private
 | `--cookie-source <browser>` | Browser to read cookies from (chrome, safari, firefox) | `chrome` |
 | `--chrome-profile <name>` | Chrome profile directory name (e.g., "Profile 1"). Auto-detected if omitted. | auto |
 | `--cookie-string <cookies>` | Manual cookie string: `"a1=VALUE; web_session=VALUE"` (from Chrome DevTools) | none |
+| `--platform <name>` | Backend: `xhs` (mainland xiaohongshu.com) or `rednote` (global rednote.com) | `xhs` |
+| `--global` | Shorthand for `--platform rednote` (the international RedNote app) | — |
 | `--json` | Output as JSON | `false` |
+
+> **Global RedNote users:** if you're logged into the international **RedNote** app (`rednote.com`, not mainland `xiaohongshu.com`), add `--global` to every command. The two are separate backends with separate sessions — without `--global` you'll get `guest` / `登录已过期`. The signing algorithm is identical; only the API host (`webapi.rednote.com`) and cookie domain (`.rednote.com`) differ.
 
 ### Search Options
 

@@ -31,6 +31,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { extractCookies, parseCookieString, type CookieSource } from "./lib/cookies.js";
+import { resolvePlatform } from "./lib/platform.js";
 import { XhsClient, XhsApiError } from "./lib/client.js";
 import { analyzeViral, formatViralAnalysis } from "./lib/analyze.js";
 import {
@@ -70,6 +71,15 @@ function addCookieOption(cmd: Command): Command {
     .option(
       "--cookie-string <cookies>",
       'Manual cookie string: "a1=VALUE; web_session=VALUE" (from Chrome DevTools)'
+    )
+    .option(
+      "--platform <name>",
+      "Which backend: 'xhs' (mainland xiaohongshu.com) or 'rednote' (global rednote.com)",
+      "xhs"
+    )
+    .option(
+      "--global",
+      "Shorthand for --platform rednote (the international RedNote app)"
     );
 }
 
@@ -77,21 +87,31 @@ function addJsonOption(cmd: Command): Command {
   return cmd.option("--json", "Output as JSON");
 }
 
-async function getClient(cookieSource: string, chromeProfile?: string, cookieString?: string): Promise<XhsClient> {
+function addUserPageOptions(cmd: Command): Command {
+  return cmd
+    .option("--xsec-token <token>", "xsec_token from a user profile URL or search result")
+    .option("--xsec-source <source>", "xsec_source paired with the user profile token");
+}
+
+async function getClient(cookieSource: string, chromeProfile?: string, cookieString?: string, platform?: string): Promise<XhsClient> {
+  const platformConfig = resolvePlatform(platform);
+  if (platformConfig.id === "rednote") {
+    console.error(kleur.dim("Platform: RedNote (global, rednote.com)."));
+  }
   if (cookieString) {
     const cookies = parseCookieString(cookieString);
     if (!cookies.a1 || !cookies.web_session) {
       console.error(kleur.red(
         "Cookie string must contain at least 'a1' and 'web_session'. " +
-        "Copy them from Chrome DevTools > Application > Cookies > xiaohongshu.com"
+        `Copy them from Chrome DevTools > Application > Cookies > ${platformConfig.homeUrl}`
       ));
       process.exit(1);
     }
     console.error(kleur.dim("Using manual cookie string."));
-    return new XhsClient(cookies);
+    return new XhsClient(cookies, platformConfig);
   }
-  const cookies = await extractCookies(cookieSource as CookieSource, chromeProfile);
-  return new XhsClient(cookies);
+  const cookies = await extractCookies(cookieSource as CookieSource, chromeProfile, platformConfig.cookieUrl);
+  return new XhsClient(cookies, platformConfig);
 }
 
 function output(data: unknown, json: boolean): void {
@@ -122,7 +142,7 @@ addJsonOption(whoamiCmd);
 
 whoamiCmd.action(async (opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const info = await client.getSelfInfo();
     if (opts.json) {
       output(info, true);
@@ -151,7 +171,7 @@ addJsonOption(searchCmd);
 
 searchCmd.action(async (keyword, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const sortMap: Record<string, "general" | "popularity_descending" | "time_descending"> = {
       general: "general",
       popular: "popularity_descending",
@@ -205,7 +225,7 @@ addJsonOption(readCmd);
 
 readCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const { noteId, xsecToken } = parseNoteUrl(url);
 
     let result: unknown;
@@ -263,7 +283,7 @@ addJsonOption(commentsCmd);
 
 commentsCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const { noteId, xsecToken } = parseNoteUrl(url);
 
     const allComments: unknown[] = [];
@@ -303,15 +323,17 @@ commentsCmd.action(async (url, opts) => {
 // ─── user ───────────────────────────────────────────────────────────────────
 
 const userCmd = program
-  .command("user <userId>")
+  .command("user <user>")
   .description("Get user profile info");
 addCookieOption(userCmd);
 addJsonOption(userCmd);
+addUserPageOptions(userCmd);
 
-userCmd.action(async (userId, opts) => {
+userCmd.action(async (userArg, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
-    const info = await client.getUserInfo(userId);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const user = parseUserProfileArg(userArg, opts);
+    const info = await client.getUserInfo(user.userId, user);
     output(info, opts.json ?? false);
   } catch (err) {
     handleError(err);
@@ -321,24 +343,26 @@ userCmd.action(async (userId, opts) => {
 // ─── user-posts ─────────────────────────────────────────────────────────────
 
 const userPostsCmd = program
-  .command("user-posts <userId>")
+  .command("user-posts <user>")
   .description("List a user's posted notes");
 addCookieOption(userPostsCmd);
 addJsonOption(userPostsCmd);
+addUserPageOptions(userPostsCmd);
 userPostsCmd.option("--cursor <cursor>", "Resume pagination from a cursor (last note_id)");
 userPostsCmd.option("--all", "Fetch all pages (paginate until no more results)");
 userPostsCmd.option("--delay <ms>", "Delay in ms between page fetches (default: 3000)", "3000");
 
-userPostsCmd.action(async (userId, opts) => {
+userPostsCmd.action(async (userArg, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const user = parseUserProfileArg(userArg, opts);
 
     if (opts.all) {
       let cursor: string = opts.cursor ?? "";
       const allNotes: Array<Record<string, unknown>> = [];
       let page = 1;
       while (true) {
-        const res = (await client.getUserNotes(userId, cursor)) as {
+        const res = (await client.getUserNotes(user.userId, cursor, user)) as {
           notes?: Array<Record<string, unknown>>;
           has_more?: boolean;
           cursor?: string;
@@ -365,7 +389,7 @@ userPostsCmd.action(async (userId, opts) => {
       return;
     }
 
-    const result = await client.getUserNotes(userId, opts.cursor ?? "");
+    const result = await client.getUserNotes(user.userId, opts.cursor ?? "", user);
     enrichWithWebUrl(result, "pc_user");
     if (opts.json) {
       output(result, true);
@@ -396,7 +420,7 @@ addJsonOption(feedCmd);
 
 feedCmd.action(async (opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const result = await client.getHomeFeed(opts.category);
     enrichWithWebUrl(result, "pc_feed");
     output(result, opts.json ?? false);
@@ -420,7 +444,7 @@ addJsonOption(postCmd);
 
 postCmd.action(async (opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const imageFiles: string[] = opts.images ?? [];
 
     if (imageFiles.length === 0) {
@@ -493,7 +517,7 @@ addJsonOption(topicsCmd);
 
 topicsCmd.action(async (keyword, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const result = await client.searchTopics(keyword);
     if (opts.json) {
       output(result, true);
@@ -522,7 +546,7 @@ addJsonOption(favoritesCmd);
 
 favoritesCmd.action(async (userId, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
 
     if (!userId) {
       const me = (await client.getSelfInfo()) as Record<string, unknown>;
@@ -579,7 +603,7 @@ addJsonOption(collectCmd);
 
 collectCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const { noteId } = parseNoteUrl(url);
     const result = await client.collectNote(noteId);
     if (opts.json) {
@@ -602,7 +626,7 @@ addJsonOption(uncollectCmd);
 
 uncollectCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const { noteId } = parseNoteUrl(url);
     const result = await client.uncollectNote(noteId);
     if (opts.json) {
@@ -626,7 +650,7 @@ addJsonOption(likeCmd);
 
 likeCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const { noteId } = parseNoteUrl(url);
     if (opts.undo) {
       const result = await client.unlikeNote(noteId);
@@ -651,7 +675,7 @@ addJsonOption(followersCmd);
 
 followersCmd.action(async (userId, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const allUsers: unknown[] = [];
     let cursor = "";
     let hasMore = true;
@@ -694,7 +718,7 @@ addJsonOption(followingCmd);
 
 followingCmd.action(async (userId, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const allUsers: unknown[] = [];
     let cursor = "";
     let hasMore = true;
@@ -736,7 +760,7 @@ addJsonOption(deleteCmd);
 
 deleteCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const { noteId } = parseNoteUrl(url);
     const result = await client.deleteNote(noteId);
     if (opts.json) {
@@ -759,7 +783,7 @@ addJsonOption(boardsCmd);
 
 boardsCmd.action(async (userId, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     let uid = userId;
     if (!uid) {
       const me = (await client.getSelfInfo()) as Record<string, string>;
@@ -797,7 +821,7 @@ addJsonOption(boardCmd);
 
 boardCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const boardId = parseBoardUrl(url);
 
     console.error(kleur.dim(`Fetching board ${boardId}...`));
@@ -882,7 +906,7 @@ addJsonOption(healthCmd);
 
 healthCmd.action(async (opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
 
     // Fetch notes from creator backend (v2 endpoint returns hidden level field)
     console.error(kleur.dim("Fetching notes from creator backend..."));
@@ -974,7 +998,7 @@ addJsonOption(analyzeViralCmd);
 
 analyzeViralCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const { noteId, xsecToken } = parseNoteUrl(url);
 
     // 1. Fetch the note (same pattern as `read` — prefer HTML, API when xsec_token present)
@@ -1093,7 +1117,7 @@ viralTemplateCmd.action(async (urls: string[], opts) => {
       process.exit(1);
     }
 
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const commentPages = Math.min(parseInt(opts.commentPages) || 3, 10);
     const analyses = [];
 
@@ -1202,7 +1226,7 @@ addJsonOption(commentCmd);
 
 commentCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const { noteId } = parseNoteUrl(url);
     const result = await client.postComment(noteId, opts.content);
     if (opts.json) {
@@ -1228,7 +1252,7 @@ addJsonOption(replyCmd);
 
 replyCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const { noteId } = parseNoteUrl(url);
     const result = await client.replyComment(noteId, opts.commentId, opts.content);
     if (opts.json) {
@@ -1257,7 +1281,7 @@ addJsonOption(batchReplyCmd);
 
 batchReplyCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
     const { noteId, xsecToken } = parseNoteUrl(url);
     const strategy = opts.strategy as StrategyName;
     const max = Math.min(parseInt(opts.max) || 10, MAX_REPLIES_HARD_CAP);
@@ -1409,6 +1433,32 @@ function parseNoteUrl(url: string): {
   }
 
   return { noteId, xsecToken };
+}
+
+function parseUserProfileArg(
+  input: string,
+  opts: { xsecToken?: string; xsecSource?: string } = {}
+): { userId: string; xsecToken: string | null; xsecSource: string | null } {
+  let userId = input;
+  let xsecToken: string | null = opts.xsecToken ?? null;
+  let xsecSource: string | null = opts.xsecSource ?? null;
+
+  try {
+    const url = new URL(input);
+    const pathParts = url.pathname.split("/").filter(Boolean);
+    const profileIdx = pathParts.findIndex((part) => part === "profile");
+    userId = profileIdx >= 0 && pathParts[profileIdx + 1]
+      ? pathParts[profileIdx + 1]
+      : pathParts[pathParts.length - 1] ?? input;
+    xsecToken = url.searchParams.get("xsec_token") ?? xsecToken;
+    xsecSource = url.searchParams.get("xsec_source") ?? xsecSource;
+  } catch {
+    // Raw user id; optional token/source may still come from flags.
+  }
+
+  if (xsecToken && !xsecSource) xsecSource = "pc_search";
+
+  return { userId, xsecToken, xsecSource };
 }
 
 program.parse();

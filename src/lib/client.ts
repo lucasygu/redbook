@@ -8,11 +8,7 @@
 import { signMainApi, USER_AGENT, buildGetUri, extractUri } from "./signing.js";
 import { signCreator } from "./creator-signing.js";
 import { cookiesToString, type XhsCookies } from "./cookies.js";
-
-const EDITH_HOST = "https://edith.xiaohongshu.com";
-const CREATOR_HOST = "https://creator.xiaohongshu.com";
-const HOME_URL = "https://www.xiaohongshu.com";
-const UPLOAD_HOST = "https://ros-upload.xiaohongshu.com";
+import { PLATFORMS, type PlatformConfig } from "./platform.js";
 
 export class XhsApiError extends Error {
   constructor(
@@ -35,11 +31,18 @@ export class NeedVerifyError extends XhsApiError {
   }
 }
 
+export interface UserPageRequestOptions {
+  xsecToken?: string | null;
+  xsecSource?: string | null;
+}
+
 export class XhsClient {
   private cookies: XhsCookies;
+  private platform: PlatformConfig;
 
-  constructor(cookies: XhsCookies) {
+  constructor(cookies: XhsCookies, platform: PlatformConfig = PLATFORMS.xhs) {
     this.cookies = cookies;
+    this.platform = platform;
   }
 
   private baseHeaders(): Record<string, string> {
@@ -47,8 +50,8 @@ export class XhsClient {
       "user-agent": USER_AGENT,
       "content-type": "application/json",
       cookie: cookiesToString(this.cookies),
-      origin: HOME_URL,
-      referer: `${HOME_URL}/`,
+      origin: this.platform.homeUrl,
+      referer: `${this.platform.homeUrl}/`,
     };
   }
 
@@ -56,9 +59,9 @@ export class XhsClient {
     uri: string,
     params?: Record<string, string | number | string[]>
   ): Promise<unknown> {
-    const signHeaders = signMainApi("GET", uri, this.cookies, params);
+    const signHeaders = signMainApi("GET", uri, this.cookies, params, undefined, undefined, this.platform.signLocation);
     const fullUri = buildGetUri(uri, params);
-    const url = `${EDITH_HOST}${fullUri}`;
+    const url = `${this.platform.edithHost}${fullUri}`;
 
     const res = await fetch(url, {
       method: "GET",
@@ -72,8 +75,8 @@ export class XhsClient {
     uri: string,
     data: Record<string, unknown>
   ): Promise<unknown> {
-    const signHeaders = signMainApi("POST", uri, this.cookies, undefined, data);
-    const url = `${EDITH_HOST}${uri}`;
+    const signHeaders = signMainApi("POST", uri, this.cookies, undefined, data, undefined, this.platform.signLocation);
+    const url = `${this.platform.edithHost}${uri}`;
 
     const res = await fetch(url, {
       method: "POST",
@@ -86,7 +89,7 @@ export class XhsClient {
 
   // /web_api/ endpoints → edith host; /api/galaxy/ → creator host
   private creatorHost(uri: string): string {
-    return uri.startsWith("/api/galaxy/") ? CREATOR_HOST : EDITH_HOST;
+    return uri.startsWith("/api/galaxy/") ? this.platform.creatorHost : this.platform.edithHost;
   }
 
   private async creatorGet(
@@ -113,8 +116,8 @@ export class XhsClient {
         ...this.baseHeaders(),
         "x-s": sign["x-s"],
         "x-t": sign["x-t"],
-        origin: CREATOR_HOST,
-        referer: `${CREATOR_HOST}/`,
+        origin: this.platform.creatorHost,
+        referer: `${this.platform.creatorHost}/`,
       },
     });
 
@@ -134,8 +137,8 @@ export class XhsClient {
         ...this.baseHeaders(),
         "x-s": sign["x-s"],
         "x-t": sign["x-t"],
-        origin: CREATOR_HOST,
-        referer: `${CREATOR_HOST}/`,
+        origin: this.platform.creatorHost,
+        referer: `${this.platform.creatorHost}/`,
       },
       body: JSON.stringify(data),
     });
@@ -199,22 +202,39 @@ export class XhsClient {
     return this.mainApiGet("/api/sns/web/v2/user/me");
   }
 
-  async getUserInfo(userId: string): Promise<unknown> {
+  async getUserInfo(
+    userId: string,
+    options: UserPageRequestOptions = {}
+  ): Promise<unknown> {
     return this.mainApiGet("/api/sns/web/v1/user/otherinfo", {
       target_user_id: userId,
+      xsec_token: options.xsecToken ?? "",
+      xsec_source: options.xsecSource ?? "",
     });
   }
 
   async getUserNotes(
     userId: string,
-    cursor: string = ""
+    cursor: string = "",
+    options: UserPageRequestOptions = {}
   ): Promise<unknown> {
-    return this.mainApiGet("/api/sns/web/v1/user_posted", {
+    const params = {
       num: 30,
       cursor,
       user_id: userId,
-      image_scenes: "FD_WM_WEBP",
-    });
+      image_formats: "jpg,webp,avif",
+      xsec_token: options.xsecToken ?? "",
+      xsec_source: options.xsecSource ?? "",
+    };
+
+    try {
+      return await this.mainApiGet("/api/sns/web/v2/user_posted", params);
+    } catch (err) {
+      if (err instanceof XhsApiError && err.code === -1) {
+        return this.mainApiGet("/api/sns/web/v1/user_posted", params);
+      }
+      throw err;
+    }
   }
 
   async searchNotes(
@@ -390,11 +410,11 @@ export class XhsClient {
     noteId: string,
     xsecToken: string
   ): Promise<unknown> {
-    const url = `${HOME_URL}/explore/${noteId}?xsec_token=${xsecToken}&xsec_source=pc_feed`;
+    const url = `${this.platform.homeUrl}/explore/${noteId}?xsec_token=${xsecToken}&xsec_source=pc_feed`;
     const res = await fetch(url, {
       headers: {
         "user-agent": USER_AGENT,
-        referer: `${HOME_URL}/`,
+        referer: `${this.platform.homeUrl}/`,
         cookie: cookiesToString(this.cookies),
       },
     });
@@ -461,12 +481,12 @@ export class XhsClient {
   async getBoardFromHtml(
     boardId: string
   ): Promise<unknown> {
-    const url = `${HOME_URL}/board/${boardId}`;
+    const url = `${this.platform.homeUrl}/board/${boardId}`;
     const res = await fetch(url, {
       headers: {
         "user-agent": USER_AGENT,
         accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        referer: `${HOME_URL}/`,
+        referer: `${this.platform.homeUrl}/`,
         cookie: cookiesToString(this.cookies),
       },
     });
@@ -517,7 +537,7 @@ export class XhsClient {
         author: (n.user as Record<string, unknown>)?.nickname ??
                 (n.user as Record<string, unknown>)?.nickName ?? "",
         cover: ((n.cover as Record<string, unknown>)?.url as string ?? "").split("?")[0],
-        url: `${HOME_URL}/explore/${n.id ?? n.noteId ?? n.note_id}`,
+        url: `${this.platform.homeUrl}/explore/${n.id ?? n.noteId ?? n.note_id}`,
       })),
     };
   }
@@ -553,7 +573,7 @@ export class XhsClient {
                 (n.user as Record<string, unknown>)?.nickname ?? "",
         cover: ((n.cover as Record<string, unknown>)?.urlDefault ??
                (n.cover as Record<string, unknown>)?.url ?? "") as string,
-        url: `${HOME_URL}/explore/${n.noteId ?? n.note_id}${n.xsecToken ? `?xsec_token=${n.xsecToken}&xsec_source=pc_share` : ""}`,
+        url: `${this.platform.homeUrl}/explore/${n.noteId ?? n.note_id}${n.xsecToken ? `?xsec_token=${n.xsecToken}&xsec_source=pc_share` : ""}`,
       })),
     };
   }
@@ -584,7 +604,7 @@ export class XhsClient {
   ): Promise<void> {
     const fs = await import("node:fs");
     const fileData = fs.readFileSync(filePath);
-    const url = `${UPLOAD_HOST}/${fileId}`;
+    const url = `${this.platform.uploadHost}/${fileId}`;
 
     const res = await fetch(url, {
       method: "PUT",
