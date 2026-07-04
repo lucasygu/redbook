@@ -68,6 +68,7 @@ redbook feed
 # 查看博主信息
 redbook user "<profileUrl>"
 redbook user-posts "<profileUrl>"
+redbook account-report --file kos-accounts.txt --month 2026-07 --json
 
 # 搜索话题标签
 redbook topics "Claude Code"
@@ -125,6 +126,7 @@ redbook post --title "测试" --body "..." --images img.png --private
 | `comments <url>` | 获取笔记评论 |
 | `user <userId\|profileUrl>` | 查看用户资料 |
 | `user-posts <userId\|profileUrl>` | 列出用户所有笔记 |
+| `account-report <user...>` | 批量统计账号发帖和互动数据 |
 | `feed` | 获取推荐页内容 |
 | `post` | 发布图文笔记（易触发验证码，详见下方说明） |
 | `topics <关键词>` | 搜索话题/标签 |
@@ -158,6 +160,17 @@ redbook post --title "测试" --body "..." --images img.png --private
 redbook user "<userId>" --xsec-token "<token>" --xsec-source pc_search --json
 redbook user-posts "<userId>" --xsec-token "<token>" --xsec-source pc_search --json
 ```
+
+### 账号报表选项
+
+`account-report` 用于按账号 ID/主页 URL 批量统计发帖和互动数据，适合 KOS/KOC 账号巡检。文件中每行一个用户 ID 或带 `xsec_token` 的主页 URL，`#` 开头的行会被忽略。
+
+```bash
+redbook account-report --file kos-accounts.txt --month 2026-07 --json
+redbook account-report "<profileUrl1>" "<profileUrl2>" --max-pages 2 --json
+```
+
+默认每个账号只拉第一页，结果里 `complete: false` 表示后面还有分页；需要完整历史时加 `--all`，或用 `--max-pages <n>` 控制每个账号最多拉几页。JSON 输出包含账号汇总和每篇笔记的点赞、评论、收藏、分享、总互动、发布时间和 `webUrl`。
 
 ### 搜索选项
 
@@ -394,6 +407,7 @@ redbook feed
 # Look up a creator
 redbook user "<profileUrl>"
 redbook user-posts "<profileUrl>"
+redbook account-report --file kos-accounts.txt --month 2026-07 --json
 
 # Search hashtags
 redbook topics "Claude Code"
@@ -450,6 +464,7 @@ redbook post --title "测试" --body "..." --images img.png --private
 | `comments <url>` | Get comments on a note |
 | `user <userId\|profileUrl>` | Get user profile info |
 | `user-posts <userId\|profileUrl>` | List a user's posted notes |
+| `account-report <user...>` | Batch summarize account posting and engagement |
 | `feed` | Get homepage feed |
 | `post` | Publish an image note (captcha-prone, see below) |
 | `topics <keyword>` | Search for topics/hashtags |
@@ -487,6 +502,17 @@ redbook post --title "测试" --body "..." --images img.png --private
 redbook user "<userId>" --xsec-token "<token>" --xsec-source pc_search --json
 redbook user-posts "<userId>" --xsec-token "<token>" --xsec-source pc_search --json
 ```
+
+### Account Report Options
+
+`account-report` summarizes posting activity and engagement by account ID/profile URL, useful for KOS/KOC account checks. A file can contain one user ID or tokenized profile URL per line; blank lines and `#` comments are ignored.
+
+```bash
+redbook account-report --file kos-accounts.txt --month 2026-07 --json
+redbook account-report "<profileUrl1>" "<profileUrl2>" --max-pages 2 --json
+```
+
+By default it fetches the first page per account. `complete: false` means more pages exist; use `--all` for full history or `--max-pages <n>` to cap page reads. JSON includes account summaries plus per-note likes, comments, collects, shares, total engagement, publish time, and `webUrl`.
 
 ### Search Options
 

@@ -36,6 +36,7 @@ Use the `redbook` CLI to search notes, read content, analyze creators, automate 
 /redbook search "AI编程"              # Search notes
 /redbook read <url>                   # Read a note
 /redbook user <profileUrl>            # Creator profile
+/redbook account-report --file ids.txt --json  # Batch account metrics
 /redbook analyze <userId>             # Full creator analysis (profile + posts)
 ```
 
@@ -48,6 +49,7 @@ Use the `redbook` CLI to search notes, read content, analyze creators, automate 
 | Get comments | `redbook comments <url> --json --all` |
 | Creator profile | `redbook user <userId-or-profileUrl> --json` |
 | Creator's posts | `redbook user-posts <userId-or-profileUrl> --json` |
+| Batch account report | `redbook account-report --file accounts.txt --month YYYY-MM --json` |
 | Browse feed | `redbook feed --json` |
 | Search hashtags | `redbook topics "keyword" --json` |
 | Analyze viral note | `redbook analyze-viral <url> --json` |
@@ -242,6 +244,23 @@ redbook user-posts "<userId>" --json
 |---------|----------|-----------|--------|-----|-------|-------|
 | @creator1 | 12万 | 3,200 | 1,800 | 45,000 | 89 | Tutorial |
 | @creator2 | 5.4万 | 8,100 | 6,500 | 22,000 | 34 | Story |
+
+---
+
+### Module D2: Known Account Reporting
+
+**Answers:** Given a known list of account IDs/profile URLs, how often did each account post and how did each post perform?
+
+Use this when the user already has KOS/KOC account IDs and wants clean account-scoped metrics. Do **not** approximate this with keyword search; keyword search introduces unrelated posts and noisy attribution.
+
+```bash
+redbook account-report --file accounts.txt --month 2026-07 --json
+redbook account-report "<profileUrl1>" "<profileUrl2>" --max-pages 2 --json
+```
+
+Input files are newline-separated user IDs or profile URLs; blank lines and `#` comments are ignored. Prefer profile URLs containing `xsec_token` when available. JSON output includes account summary fields (`fetchedPosts`, `postsInMonth`, `complete`, `pagesFetched`), engagement totals and averages, top posts, and per-note rows with title, type, publish time, metrics, and `webUrl`.
+
+Default mode fetches only the first page per account. `complete: false` means more pages exist. Use `--all` only when the user explicitly wants full history and the account list is small enough to pace safely; otherwise prefer `--max-pages <n>`.
 
 ---
 
@@ -848,6 +867,24 @@ List all notes posted by a creator. Returns titles, URLs, likes, timestamps.
 ```bash
 redbook user-posts "https://www.xiaohongshu.com/user/profile/5a1234567890abcdef012345?xsec_token=...&xsec_source=pc_search" --json
 ```
+
+### `redbook account-report <userId|profileUrl...>`
+
+Batch summarize account posting and engagement metrics.
+
+```bash
+redbook account-report --file accounts.txt --month 2026-07 --json
+redbook account-report "<profileUrl1>" "<profileUrl2>" --max-pages 2 --json
+```
+
+Options:
+- `--file <path>`: newline-separated account IDs/profile URLs
+- `--month <YYYY-MM>`: month used for `postsInMonth` (default: current month)
+- `--max-pages <n>`: page cap per account when not using `--all` (default: 1)
+- `--all`: fetch every page for each account
+- `--delay <ms>`: delay between page/account requests (default: 3000)
+
+For KOS/KOC reporting, feed it known account IDs or profile URLs instead of using keyword search. If a bare userId returns `code=-1`, use a fresh profile URL containing `xsec_token`.
 
 ### `redbook feed`
 

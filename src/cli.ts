@@ -10,6 +10,7 @@
  *   redbook comments <url> --cookie-source chrome --json
  *   redbook user <user-id-or-profile-url> --cookie-source chrome --json
  *   redbook user-posts <user-id-or-profile-url> --cookie-source chrome --json
+ *   redbook account-report <user-id-or-profile-url...> --cookie-source chrome --json
  *   redbook feed --cookie-source chrome --json
  *   redbook post --title "..." --body "..." --images img1.jpg --cookie-source chrome
  *   redbook topics "keyword" --cookie-source chrome
@@ -404,6 +405,74 @@ userPostsCmd.action(async (userArg, opts) => {
         console.log(kleur.dim(`\n${data.notes.length} notes`));
       }
     }
+  } catch (err) {
+    handleError(err);
+  }
+});
+
+// ─── account-report ─────────────────────────────────────────────────────────
+
+const accountReportCmd = program
+  .command("account-report [users...]")
+  .alias("creator-report")
+  .description("Summarize posting activity and engagement for one or more accounts");
+addCookieOption(accountReportCmd);
+addJsonOption(accountReportCmd);
+addUserPageOptions(accountReportCmd);
+accountReportCmd.option("--file <path>", "Read account IDs/profile URLs from a newline-separated file");
+accountReportCmd.option("--month <yyyy-mm>", "Month to count posts for (default: current month)");
+accountReportCmd.option("--all", "Fetch all pages for each account");
+accountReportCmd.option("--max-pages <n>", "Max pages per account when --all is not set (default: 1)");
+accountReportCmd.option("--delay <ms>", "Delay in ms between page/account fetches (default: 3000)");
+
+accountReportCmd.action(async (users: string[] | undefined, opts) => {
+  try {
+    const inputs = collectAccountInputs(users ?? [], opts.file);
+    if (inputs.length === 0) {
+      console.error(kleur.red("Provide at least one account ID/profile URL, or use --file <path>."));
+      process.exit(1);
+    }
+
+    const month = parseReportMonth(opts.month);
+    const delayMs = Math.max(0, parseInt(opts.delay ?? "3000", 10) || 0);
+    const maxPages = opts.all
+      ? Number.POSITIVE_INFINITY
+      : Math.max(1, parseInt(opts.maxPages ?? "1", 10) || 1);
+    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const reports: AccountReport[] = [];
+    const errors: Array<{ input: string; userId?: string; error: string }> = [];
+
+    for (let idx = 0; idx < inputs.length; idx++) {
+      const input = inputs[idx];
+      const user = parseUserProfileArg(input, opts);
+      try {
+        const report = await buildAccountReport(client, input, user, month, maxPages, delayMs);
+        reports.push(report);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        errors.push({ input, userId: user.userId, error: message });
+        console.error(kleur.red(`Failed ${user.userId}: ${message}`));
+      }
+
+      if (idx < inputs.length - 1 && delayMs > 0) {
+        await sleep(delayMs);
+      }
+    }
+
+    const result = {
+      month: month.label,
+      generatedAt: new Date().toISOString(),
+      accounts: reports,
+      errors,
+    };
+
+    if (opts.json) {
+      output(result, true);
+    } else {
+      printAccountReport(result);
+    }
+
+    if (errors.length > 0) process.exitCode = 1;
   } catch (err) {
     handleError(err);
   }
@@ -1401,6 +1470,67 @@ renderCmd.action(async (file, opts) => {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+interface ParsedUserProfileArg {
+  userId: string;
+  xsecToken: string | null;
+  xsecSource: string | null;
+}
+
+interface ReportMonth {
+  label: string;
+  start: Date;
+  end: Date;
+}
+
+interface AccountReportNote {
+  noteId: string;
+  title: string;
+  type: string;
+  publishedAt: string | null;
+  likes: number;
+  comments: number;
+  collects: number;
+  shares: number;
+  totalEngagement: number;
+  webUrl?: string;
+}
+
+interface AccountReport {
+  input: string;
+  userId: string;
+  month: string;
+  fetchedPosts: number;
+  postsInMonth: number;
+  pagesFetched: number;
+  complete: boolean;
+  hasMore: boolean;
+  nextCursor: string | null;
+  totals: {
+    likes: number;
+    comments: number;
+    collects: number;
+    shares: number;
+    totalEngagement: number;
+  };
+  monthTotals: {
+    likes: number;
+    comments: number;
+    collects: number;
+    shares: number;
+    totalEngagement: number;
+  };
+  averages: {
+    likes: number;
+    comments: number;
+    collects: number;
+    shares: number;
+    totalEngagement: number;
+  };
+  topByLikes: AccountReportNote | null;
+  topByEngagement: AccountReportNote | null;
+  notes: AccountReportNote[];
+}
+
 function parseBoardUrl(url: string): string {
   if (url.includes("xiaohongshu.com/board/")) {
     const urlObj = new URL(url);
@@ -1438,7 +1568,7 @@ function parseNoteUrl(url: string): {
 function parseUserProfileArg(
   input: string,
   opts: { xsecToken?: string; xsecSource?: string } = {}
-): { userId: string; xsecToken: string | null; xsecSource: string | null } {
+): ParsedUserProfileArg {
   let userId = input;
   let xsecToken: string | null = opts.xsecToken ?? null;
   let xsecSource: string | null = opts.xsecSource ?? null;
@@ -1459,6 +1589,276 @@ function parseUserProfileArg(
   if (xsecToken && !xsecSource) xsecSource = "pc_search";
 
   return { userId, xsecToken, xsecSource };
+}
+
+function collectAccountInputs(users: string[], file?: string): string[] {
+  const fromFile = file
+    ? readFileSync(file, "utf-8")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith("#"))
+    : [];
+
+  const seen = new Set<string>();
+  const inputs: string[] = [];
+  for (const input of [...users, ...fromFile]) {
+    const trimmed = input.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    inputs.push(trimmed);
+  }
+  return inputs;
+}
+
+function parseReportMonth(input?: string): ReportMonth {
+  const now = new Date();
+  const label = input ?? `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const match = /^(\d{4})-(\d{2})$/.exec(label);
+  if (!match) {
+    throw new Error("Invalid --month. Use YYYY-MM, for example 2026-07.");
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) {
+    throw new Error("Invalid --month. Month must be 01-12.");
+  }
+
+  return {
+    label,
+    start: new Date(year, month - 1, 1),
+    end: new Date(year, month, 1),
+  };
+}
+
+async function buildAccountReport(
+  client: XhsClient,
+  input: string,
+  user: ParsedUserProfileArg,
+  month: ReportMonth,
+  maxPages: number,
+  delayMs: number
+): Promise<AccountReport> {
+  const rawNotes: Array<Record<string, unknown>> = [];
+  let cursor = "";
+  let pagesFetched = 0;
+  let hasMore = false;
+  let nextCursor: string | null = null;
+
+  while (pagesFetched < maxPages) {
+    const res = (await client.getUserNotes(user.userId, cursor, user)) as {
+      notes?: Array<Record<string, unknown>>;
+      has_more?: boolean;
+      cursor?: string;
+    };
+
+    const notes = res.notes ?? [];
+    enrichWithWebUrl(notes, "pc_user");
+    rawNotes.push(...notes);
+    pagesFetched++;
+
+    hasMore = Boolean(res.has_more);
+    nextCursor = typeof res.cursor === "string" && res.cursor.length > 0
+      ? res.cursor
+      : null;
+
+    if (!hasMore || !nextCursor || notes.length === 0) break;
+    if (pagesFetched >= maxPages) break;
+
+    cursor = nextCursor;
+    if (delayMs > 0) await sleep(delayMs);
+  }
+
+  const notes = rawNotes.map(normalizeAccountReportNote);
+  const monthNotes = notes.filter((note) => isInReportMonth(note.publishedAt, month));
+  const totals = sumReportNotes(notes);
+  const monthTotals = sumReportNotes(monthNotes);
+
+  return {
+    input,
+    userId: user.userId,
+    month: month.label,
+    fetchedPosts: notes.length,
+    postsInMonth: monthNotes.length,
+    pagesFetched,
+    complete: !hasMore || !nextCursor,
+    hasMore,
+    nextCursor,
+    totals,
+    monthTotals,
+    averages: averageReportNotes(totals, notes.length),
+    topByLikes: topReportNote(notes, "likes"),
+    topByEngagement: topReportNote(notes, "totalEngagement"),
+    notes,
+  };
+}
+
+function normalizeAccountReportNote(note: Record<string, unknown>): AccountReportNote {
+  const interactInfo = (note.interact_info ?? {}) as Record<string, unknown>;
+  const likes = metricNumber(interactInfo.liked_count ?? note.liked_count);
+  const comments = metricNumber(interactInfo.comment_count ?? note.comment_count);
+  const collects = metricNumber(interactInfo.collected_count ?? note.collected_count);
+  const shares = metricNumber(interactInfo.share_count ?? note.share_count);
+  const noteId = String(note.note_id ?? note.noteId ?? "");
+  const title = String(note.display_title ?? note.title ?? note.desc ?? "(no title)");
+  const publishedAt = parseNotePublishedAt(note);
+  const webUrl = typeof note.webUrl === "string"
+    ? note.webUrl
+    : typeof note.url === "string"
+      ? note.url
+      : undefined;
+
+  return {
+    noteId,
+    title,
+    type: String(note.type ?? "unknown"),
+    publishedAt: publishedAt ? publishedAt.toISOString() : null,
+    likes,
+    comments,
+    collects,
+    shares,
+    totalEngagement: likes + comments + collects + shares,
+    ...(webUrl ? { webUrl } : {}),
+  };
+}
+
+function parseNotePublishedAt(note: Record<string, unknown>): Date | null {
+  for (const key of [
+    "time",
+    "create_time",
+    "createTime",
+    "timestamp",
+    "publish_time",
+    "publishTime",
+    "last_update_time",
+    "lastUpdateTime",
+  ]) {
+    const parsed = parseTimestampValue(note[key]);
+    if (parsed) return parsed;
+  }
+  return null;
+}
+
+function parseTimestampValue(value: unknown): Date | null {
+  if (typeof value === "number") return timestampNumberToDate(value);
+  if (typeof value !== "string") return null;
+
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (/^\d+$/.test(trimmed)) {
+    return timestampNumberToDate(Number(trimmed));
+  }
+
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? null : new Date(parsed);
+}
+
+function timestampNumberToDate(value: number): Date | null {
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const ms = value < 1_000_000_000_000 ? value * 1000 : value;
+  const date = new Date(ms);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isInReportMonth(isoDate: string | null, month: ReportMonth): boolean {
+  if (!isoDate) return false;
+  const date = new Date(isoDate);
+  return date >= month.start && date < month.end;
+}
+
+function metricNumber(value: unknown): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value !== "string") return 0;
+
+  const s = value.trim().replace(/,/g, "");
+  if (!s) return 0;
+  if (s.endsWith("万")) {
+    const n = parseFloat(s.slice(0, -1));
+    return Number.isNaN(n) ? 0 : Math.round(n * 10000);
+  }
+  if (s.endsWith("亿")) {
+    const n = parseFloat(s.slice(0, -1));
+    return Number.isNaN(n) ? 0 : Math.round(n * 100000000);
+  }
+  const n = parseFloat(s);
+  return Number.isNaN(n) ? 0 : Math.round(n);
+}
+
+function sumReportNotes(notes: AccountReportNote[]): AccountReport["totals"] {
+  return notes.reduce(
+    (acc, note) => ({
+      likes: acc.likes + note.likes,
+      comments: acc.comments + note.comments,
+      collects: acc.collects + note.collects,
+      shares: acc.shares + note.shares,
+      totalEngagement: acc.totalEngagement + note.totalEngagement,
+    }),
+    { likes: 0, comments: 0, collects: 0, shares: 0, totalEngagement: 0 }
+  );
+}
+
+function averageReportNotes(
+  totals: AccountReport["totals"],
+  count: number
+): AccountReport["averages"] {
+  if (count === 0) {
+    return { likes: 0, comments: 0, collects: 0, shares: 0, totalEngagement: 0 };
+  }
+  return {
+    likes: round2(totals.likes / count),
+    comments: round2(totals.comments / count),
+    collects: round2(totals.collects / count),
+    shares: round2(totals.shares / count),
+    totalEngagement: round2(totals.totalEngagement / count),
+  };
+}
+
+function topReportNote(
+  notes: AccountReportNote[],
+  field: "likes" | "totalEngagement"
+): AccountReportNote | null {
+  if (notes.length === 0) return null;
+  return notes.reduce((best, note) => note[field] > best[field] ? note : best, notes[0]);
+}
+
+function printAccountReport(result: {
+  month: string;
+  accounts: AccountReport[];
+  errors: Array<{ input: string; userId?: string; error: string }>;
+}): void {
+  console.log(kleur.bold(`Account report (${result.month})`));
+  for (const account of result.accounts) {
+    const partial = account.complete ? "" : kleur.yellow(" partial");
+    const top = account.topByLikes
+      ? `${formatNumber(account.topByLikes.likes)} likes - ${account.topByLikes.title}`
+      : "n/a";
+    console.log(
+      `${kleur.bold(account.userId)}${partial}  ` +
+        `posts:${account.fetchedPosts}  month:${account.postsInMonth}  ` +
+        `likes:${formatNumber(account.totals.likes)}  ` +
+        `avg:${formatNumber(account.averages.likes)}  top:${top}`
+    );
+  }
+
+  if (result.errors.length > 0) {
+    console.log(kleur.red(`\n${result.errors.length} account(s) failed:`));
+    for (const err of result.errors) {
+      console.log(`  ${err.userId ?? err.input}: ${err.error}`);
+    }
+  }
+}
+
+function formatNumber(value: number): string {
+  return value.toLocaleString("en-US");
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 program.parse();
