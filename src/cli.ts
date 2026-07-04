@@ -581,6 +581,19 @@ readCmd.action(async (url, opts) => {
       if (!r.webUrl) r.webUrl = buildWebUrl(noteId, xsecToken, "pc_share");
     }
 
+    const isEmptyResult =
+      !result ||
+      (typeof result === "object" &&
+        !Array.isArray(result) &&
+        Object.keys(result as Record<string, unknown>).length === 0);
+    if (isEmptyResult && !xsecToken) {
+      console.error(kleur.yellow(
+        "Note returned empty. This usually means the request needs an xsec_token.\n" +
+        "Tip: use a full note URL from search results or the browser address bar, e.g.:\n" +
+        `  redbook read "https://www.xiaohongshu.com/explore/${noteId}?xsec_token=TOKEN&xsec_source=pc_search"`
+      ));
+    }
+
     if (opts.json) {
       output(result, true);
     } else {
