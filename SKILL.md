@@ -71,6 +71,7 @@ Use the `redbook` CLI to search notes, read content, analyze creators, automate 
 | Render markdown to cards | `redbook render content.md --style xiaohongshu` |
 | Publish image note | `redbook post --title "..." --body "..." --images img.jpg` |
 | Check connection | `redbook whoami` |
+| Save cookies for cloud/OpenClaw | `redbook auth export` or `redbook auth save --cookie-string "a1=...; web_session=..."` |
 
 **Always add `--json`** when parsing output programmatically. Without it, output is human-formatted text.
 
@@ -1051,6 +1052,27 @@ Check connection status. Verifies cookies are valid and shows the logged-in user
 redbook whoami
 ```
 
+### `redbook auth`
+
+Manage saved cookies for OpenClaw, cloud, or CI runs where browser cookie extraction is unavailable or `--cookie-string` would be repeated on every command.
+
+```bash
+# Export from the logged-in local browser to ~/.redbook/cookies.json
+redbook auth export
+
+# Or save a cookie string copied from Chrome DevTools
+redbook auth save --cookie-string "a1=VALUE; web_session=VALUE"
+
+# Inspect without printing secret cookie values
+redbook auth path
+redbook auth inspect --json
+
+# Remove saved local reuse
+redbook auth clear
+```
+
+Normal commands resolve cookies in this order: `--cookie-string`, `REDBOOK_COOKIE_STRING`, `REDBOOK_COOKIE_FILE`, `~/.redbook/cookies.json`, then browser extraction. Saved cookie files are plaintext login credentials written with `0600` permissions; never commit them or include them in logs.
+
 ### `redbook post` (Limited)
 
 Publish an image note. **Frequently triggers captcha (type=124) on the creator API.** Image upload works, but the publish step is unreliable. For posting, consider using browser automation instead.
@@ -1072,6 +1094,7 @@ redbook post --title "测试" --body "..." --images img.png --private --json
 All commands accept:
 - `--cookie-source <browser>`: `chrome` (default), `safari`, `firefox`
 - `--chrome-profile <name>`: Chrome profile directory name (e.g., "Profile 1"). Auto-discovered if omitted.
+- `--cookie-string <cookies>`: manual cookie string, e.g. `"a1=VALUE; web_session=VALUE"`
 - `--platform <name>`: force `xhs` (mainland) or `rednote` (global). **Default: auto-detect** which one you're logged into — see [Mainland vs Global](#mainland-xiaohongshu-vs-global-rednote).
 - `--global`: force the global RedNote backend (= `--platform rednote`)
 - `--json`: Output as JSON

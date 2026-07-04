@@ -142,6 +142,7 @@ redbook post --title "测试" --body "..." --images img.png --private
 | `reply <url>` | 回复指定评论 |
 | `batch-reply <url>` | 按策略批量回复评论（支持预览模式） |
 | `render <文件>` | Markdown 渲染为小红书图文卡片 PNG（需可选依赖） |
+| `auth` | 保存、导出、检查 Cookie 文件，适合云端/OpenClaw 使用 |
 
 ### 通用选项
 
@@ -150,7 +151,34 @@ redbook post --title "测试" --body "..." --images img.png --private
 | `--cookie-source <浏览器>` | Cookie 来源浏览器（chrome, safari, firefox） | `chrome` |
 | `--chrome-profile <名称>` | Chrome 配置文件目录名（如 "Profile 1"），默认自动检测 | 自动 |
 | `--cookie-string <cookies>` | 手动传入 Cookie 字符串：`"a1=值; web_session=值"`（从 Chrome DevTools 复制） | 无 |
+| `--platform <name>` | 强制后端：`xhs`（大陆）或 `rednote`（全球版），不传则自动检测 | 自动 |
+| `--global` | 强制使用全球版 RedNote 后端（等同 `--platform rednote`） | 无 |
 | `--json` | JSON 格式输出 | `false` |
+
+### 保存 Cookie / 云端使用
+
+如果在 OpenClaw、云服务器或 CI 里运行，不想每条命令都加 `--cookie-string`，可以把 Cookie 保存成文件。普通命令会按这个顺序读取 Cookie：`--cookie-string` → `REDBOOK_COOKIE_STRING` → `REDBOOK_COOKIE_FILE` → `~/.redbook/cookies.json` → 本机浏览器。
+
+```bash
+# 本地浏览器已登录时，导出到默认路径 ~/.redbook/cookies.json
+redbook auth export
+
+# 或手动保存从 DevTools 复制的 Cookie 字符串
+redbook auth save --cookie-string "a1=值; web_session=值"
+
+# 查看保存位置和键名（不会打印 Cookie 值）
+redbook auth path
+redbook auth inspect
+
+# 上传 ~/.redbook/cookies.json 到云端后，普通命令会自动读取
+redbook whoami
+
+# 如果放在自定义路径
+export REDBOOK_COOKIE_FILE=/secure/path/redbook-cookies.json
+redbook search "AI编程" --json
+```
+
+Cookie 文件是明文登录凭据，默认写入权限为 `0600`。不要提交到 Git，也不要贴到日志里。需要撤销时可以删除文件或执行 `redbook auth clear`，然后在浏览器里退出登录/重新登录刷新会话。
 
 ### 用户主页选项
 
@@ -480,6 +508,7 @@ redbook post --title "测试" --body "..." --images img.png --private
 | `reply <url>` | Reply to a specific comment |
 | `batch-reply <url>` | Batch reply to comments with filtering strategy (supports dry-run) |
 | `render <file>` | Render markdown to styled PNG image cards for XHS posts (optional deps) |
+| `auth` | Save, export, inspect, and clear reusable cookie files for cloud/OpenClaw runs |
 
 ### Global Options
 
@@ -493,6 +522,31 @@ redbook post --title "测试" --body "..." --images img.png --private
 | `--json` | Output as JSON | `false` |
 
 > **Mainland 小红书 vs global RedNote — handled automatically.** These are two separate backends (`xiaohongshu.com` / `edith.xiaohongshu.com` vs `rednote.com` / `webapi.rednote.com`) with separate sessions and cookie domains; RedNote routes you to one by IP/region and you can only be signed into one at a time. The CLI **auto-detects which one you're logged into** (probing both cookie domains, verifying with one `/user/me` call when both have cookies, then caching the result in `~/.redbook/`), so you normally pass **no flag**. Use `--global` / `--platform xhs` only to force one.
+
+### Saved Cookies / Cloud Use
+
+For OpenClaw, cloud servers, or CI, save cookies once so every command does not need `--cookie-string`. Normal commands resolve cookies in this order: `--cookie-string` → `REDBOOK_COOKIE_STRING` → `REDBOOK_COOKIE_FILE` → `~/.redbook/cookies.json` → local browser extraction.
+
+```bash
+# Export from a logged-in local browser to ~/.redbook/cookies.json
+redbook auth export
+
+# Or save a cookie string copied from DevTools
+redbook auth save --cookie-string "a1=VALUE; web_session=VALUE"
+
+# Inspect path/keys without printing secret values
+redbook auth path
+redbook auth inspect
+
+# After uploading ~/.redbook/cookies.json to the cloud, commands auto-load it
+redbook whoami
+
+# For a custom location
+export REDBOOK_COOKIE_FILE=/secure/path/redbook-cookies.json
+redbook search "AI编程" --json
+```
+
+The cookie file is a plaintext login credential and is written with `0600` permissions by default. Do not commit it or print it in logs. To revoke local reuse, remove it with `redbook auth clear`, then log out/in from the browser to rotate the session.
 
 ### User Profile Options
 

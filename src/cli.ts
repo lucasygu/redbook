@@ -28,11 +28,24 @@
 
 import { Command } from "commander";
 import kleur from "kleur";
-import { readFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-import { extractCookies, parseCookieString, type CookieSource } from "./lib/cookies.js";
-import { resolvePlatform } from "./lib/platform.js";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  extractCookies,
+  parseCookieString,
+  type CookieSource,
+  type XhsCookies,
+} from "./lib/cookies.js";
+import { resolvePlatform, type PlatformId } from "./lib/platform.js";
 import { detectPlatform, detectPlatformForCookies } from "./lib/detect.js";
 import { XhsClient, XhsApiError } from "./lib/client.js";
 import { analyzeViral, formatViralAnalysis } from "./lib/analyze.js";
@@ -50,6 +63,8 @@ import { buildWebUrl, enrichWithWebUrl } from "./lib/url.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8"));
+const REDBOOK_DIR = join(homedir(), ".redbook");
+const DEFAULT_COOKIE_FILE = join(REDBOOK_DIR, "cookies.json");
 
 const program = new Command();
 
@@ -94,23 +109,203 @@ function addUserPageOptions(cmd: Command): Command {
     .option("--xsec-source <source>", "xsec_source paired with the user profile token");
 }
 
+interface LoadedCookieFile {
+  path: string;
+  cookies: XhsCookies;
+  platform?: PlatformId;
+  createdAt?: string;
+}
+
+interface SavedCookieSummary {
+  path: string;
+  platform: PlatformId | null;
+  createdAt: string | null;
+  keyCount: number;
+  keys: string[];
+  hasA1: boolean;
+  hasWebSession: boolean;
+}
+
+function expandHomePath(filePath: string): string {
+  if (filePath === "~") return homedir();
+  if (filePath.startsWith("~/")) return join(homedir(), filePath.slice(2));
+  return filePath;
+}
+
+function resolveCookieFilePath(filePath?: string): string {
+  const raw = expandHomePath(filePath || process.env.REDBOOK_COOKIE_FILE || DEFAULT_COOKIE_FILE);
+  return isAbsolute(raw) ? raw : resolve(process.cwd(), raw);
+}
+
+function defaultCookieFileForRead(): string | null {
+  if (process.env.REDBOOK_COOKIE_FILE) {
+    return resolveCookieFilePath(process.env.REDBOOK_COOKIE_FILE);
+  }
+  return existsSync(DEFAULT_COOKIE_FILE) ? DEFAULT_COOKIE_FILE : null;
+}
+
+function parsePlatformId(value: unknown, source: string): PlatformId | undefined {
+  if (value == null || value === "") return undefined;
+  if (typeof value !== "string") {
+    throw new Error(`${source} has an invalid platform value.`);
+  }
+  const raw = value.toLowerCase();
+  if (raw === "xhs" || raw === "xiaohongshu" || raw === "mainland") return "xhs";
+  if (raw === "rednote" || raw === "global") return "rednote";
+  throw new Error(`${source} platform must be 'xhs' or 'rednote'.`);
+}
+
+function validateCookieMap(cookies: XhsCookies, source: string): XhsCookies {
+  if (!cookies.a1 || !cookies.web_session) {
+    throw new Error(
+      `${source} must contain at least 'a1' and 'web_session'. ` +
+      "Copy them from Chrome DevTools > Application > Cookies."
+    );
+  }
+  return cookies;
+}
+
+function cookieMapFromRecord(record: Record<string, unknown>, source: string): XhsCookies {
+  const cookies: Record<string, string> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value === "string") cookies[key] = value;
+  }
+  return validateCookieMap(cookies as XhsCookies, source);
+}
+
+function parseManualCookies(cookieString: string, source: string): XhsCookies {
+  return validateCookieMap(parseCookieString(cookieString), source);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function loadSavedCookieFile(filePath?: string): LoadedCookieFile {
+  const path = resolveCookieFilePath(filePath);
+  const raw = readFileSync(path, "utf-8").trim();
+  if (!raw) throw new Error(`Cookie file is empty: ${path}`);
+
+  if (!raw.startsWith("{")) {
+    return {
+      path,
+      cookies: parseManualCookies(raw, `Cookie file ${path}`),
+    };
+  }
+
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isRecord(parsed)) throw new Error(`Cookie file must be a JSON object: ${path}`);
+
+  const platform = parsePlatformId(parsed.platform, `Cookie file ${path}`);
+  const createdAt = typeof parsed.createdAt === "string" ? parsed.createdAt : undefined;
+
+  if (typeof parsed.cookieString === "string") {
+    return {
+      path,
+      platform,
+      createdAt,
+      cookies: parseManualCookies(parsed.cookieString, `Cookie file ${path}`),
+    };
+  }
+
+  if (isRecord(parsed.cookies)) {
+    return {
+      path,
+      platform,
+      createdAt,
+      cookies: cookieMapFromRecord(parsed.cookies, `Cookie file ${path}`),
+    };
+  }
+
+  return {
+    path,
+    platform,
+    createdAt,
+    cookies: cookieMapFromRecord(parsed, `Cookie file ${path}`),
+  };
+}
+
+function writeSavedCookieFile(filePath: string, cookies: XhsCookies, platform: PlatformId): LoadedCookieFile {
+  const path = resolveCookieFilePath(filePath);
+  validateCookieMap(cookies, "Cookie data");
+  mkdirSync(dirname(path), { recursive: true });
+  const createdAt = new Date().toISOString();
+  const sortedCookies = Object.fromEntries(
+    Object.entries(cookies).sort(([a], [b]) => a.localeCompare(b))
+  );
+  writeFileSync(
+    path,
+    JSON.stringify(
+      {
+        version: 1,
+        platform,
+        createdAt,
+        cookies: sortedCookies,
+      },
+      null,
+      2
+    ) + "\n",
+    { mode: 0o600 }
+  );
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // Best effort on platforms/filesystems that do not support POSIX modes.
+  }
+  return { path, cookies, platform, createdAt };
+}
+
+function summarizeCookieFile(loaded: LoadedCookieFile): SavedCookieSummary {
+  const keys = Object.keys(loaded.cookies).sort();
+  return {
+    path: loaded.path,
+    platform: loaded.platform ?? null,
+    createdAt: loaded.createdAt ?? null,
+    keyCount: keys.length,
+    keys,
+    hasA1: Boolean(loaded.cookies.a1),
+    hasWebSession: Boolean(loaded.cookies.web_session),
+  };
+}
+
+function printCookieSummary(summary: SavedCookieSummary, verb: string): void {
+  console.log(kleur.green(`${verb}: ${summary.path}`));
+  console.log(`  Platform: ${summary.platform ?? "not stored"}`);
+  console.log(`  Keys: ${summary.keys.join(", ")}`);
+  if (summary.createdAt) console.log(`  Created: ${summary.createdAt}`);
+}
+
+function optionPlatform(opts: { global?: boolean; platform?: string }): string | undefined {
+  return opts.global ? "rednote" : opts.platform;
+}
+
 async function getClient(cookieSource: string, chromeProfile?: string, cookieString?: string, platform?: string): Promise<XhsClient> {
   // An explicit choice (--platform / --global / REDBOOK_PLATFORM) skips detection.
   const explicit = platform || process.env.REDBOOK_PLATFORM;
+  const cookieStringInput = cookieString || process.env.REDBOOK_COOKIE_STRING;
 
   // ── Manual cookie string ──
-  if (cookieString) {
-    const cookies = parseCookieString(cookieString);
-    if (!cookies.a1 || !cookies.web_session) {
-      console.error(kleur.red(
-        "Cookie string must contain at least 'a1' and 'web_session'. " +
-        "Copy them from Chrome DevTools > Application > Cookies."
-      ));
-      process.exit(1);
-    }
-    console.error(kleur.dim("Using manual cookie string."));
+  if (cookieStringInput) {
+    const cookies = parseManualCookies(
+      cookieStringInput,
+      cookieString ? "--cookie-string" : "REDBOOK_COOKIE_STRING"
+    );
+    console.error(kleur.dim(cookieString ? "Using manual cookie string." : "Using REDBOOK_COOKIE_STRING."));
     const cfg = explicit ? resolvePlatform(explicit) : await detectPlatformForCookies(cookies);
     return new XhsClient(cookies, cfg);
+  }
+
+  // ── Saved cookie file ──
+  const savedCookiePath = defaultCookieFileForRead();
+  if (savedCookiePath) {
+    const saved = loadSavedCookieFile(savedCookiePath);
+    const cfg = explicit
+      ? resolvePlatform(explicit)
+      : saved.platform
+        ? resolvePlatform(saved.platform)
+        : resolvePlatform();
+    console.error(kleur.dim(`Using saved cookie file: ${saved.path}`));
+    return new XhsClient(saved.cookies, cfg);
   }
 
   // ── Explicit platform ──
@@ -168,6 +363,126 @@ whoamiCmd.action(async (opts) => {
       console.log(`  ID:   ${user.user_id ?? "unknown"}`);
       if (user.red_id) console.log(`  RedID: ${user.red_id}`);
     }
+  } catch (err) {
+    handleError(err);
+  }
+});
+
+// ─── auth ──────────────────────────────────────────────────────────────────
+
+const authCmd = program
+  .command("auth")
+  .description("Manage saved cookies for cloud/CI environments");
+
+const authPathCmd = authCmd
+  .command("path")
+  .description("Print the default saved cookie file path");
+addJsonOption(authPathCmd);
+
+authPathCmd.action((opts) => {
+  const data = { path: resolveCookieFilePath() };
+  if (opts.json) output(data, true);
+  else console.log(data.path);
+});
+
+const authSaveCmd = authCmd
+  .command("save")
+  .description("Save a manual cookie string to a reusable cookie file")
+  .requiredOption(
+    "--cookie-string <cookies>",
+    'Cookie string from Chrome DevTools, e.g. "a1=VALUE; web_session=VALUE"'
+  )
+  .option("--output <path>", "Cookie file to write (default: ~/.redbook/cookies.json)")
+  .option(
+    "--platform <name>",
+    "Cookie backend: 'xhs' (mainland xiaohongshu.com) or 'rednote' (global rednote.com)",
+    "xhs"
+  )
+  .option("--global", "Save as global RedNote cookies (shorthand for --platform rednote)");
+addJsonOption(authSaveCmd);
+
+authSaveCmd.action((opts) => {
+  try {
+    const cfg = resolvePlatform(optionPlatform(opts));
+    const cookies = parseManualCookies(opts.cookieString, "--cookie-string");
+    const saved = writeSavedCookieFile(resolveCookieFilePath(opts.output), cookies, cfg.id);
+    const summary = summarizeCookieFile(saved);
+    if (opts.json) output(summary, true);
+    else printCookieSummary(summary, "Saved cookie file");
+  } catch (err) {
+    handleError(err);
+  }
+});
+
+const authExportCmd = authCmd
+  .command("export [output]")
+  .description("Export browser cookies to a reusable cookie file")
+  .option("--output <path>", "Cookie file to write (default: ~/.redbook/cookies.json)")
+  .option(
+    "--cookie-source <browser>",
+    "Browser to read cookies from (chrome, safari, firefox)",
+    "chrome"
+  )
+  .option(
+    "--chrome-profile <name>",
+    'Chrome profile directory name (e.g., "Profile 1")'
+  )
+  .option(
+    "--platform <name>",
+    "Force backend: 'xhs' (mainland xiaohongshu.com) or 'rednote' (global rednote.com). Default: auto-detect."
+  )
+  .option("--global", "Force the global RedNote backend (shorthand for --platform rednote)");
+addJsonOption(authExportCmd);
+
+authExportCmd.action(async (outputPath: string | undefined, opts) => {
+  try {
+    const explicit = optionPlatform(opts);
+    const source = opts.cookieSource as CookieSource;
+    const cfg = explicit ? resolvePlatform(explicit) : undefined;
+    const detected = cfg ? null : await detectPlatform(source, opts.chromeProfile);
+    const platform = cfg ?? detected!.platform;
+    const cookies = detected?.cookies ?? await extractCookies(
+      source,
+      opts.chromeProfile,
+      platform.cookieUrl
+    );
+    const saved = writeSavedCookieFile(resolveCookieFilePath(outputPath || opts.output), cookies, platform.id);
+    const summary = summarizeCookieFile(saved);
+    if (opts.json) output(summary, true);
+    else printCookieSummary(summary, "Exported cookie file");
+  } catch (err) {
+    handleError(err);
+  }
+});
+
+const authInspectCmd = authCmd
+  .command("inspect [file]")
+  .description("Inspect a saved cookie file without printing secret values");
+addJsonOption(authInspectCmd);
+
+authInspectCmd.action((file: string | undefined, opts) => {
+  try {
+    const summary = summarizeCookieFile(loadSavedCookieFile(file));
+    if (opts.json) output(summary, true);
+    else printCookieSummary(summary, "Cookie file");
+  } catch (err) {
+    handleError(err);
+  }
+});
+
+const authClearCmd = authCmd
+  .command("clear [file]")
+  .description("Remove a saved cookie file");
+addJsonOption(authClearCmd);
+
+authClearCmd.action((file: string | undefined, opts) => {
+  try {
+    const path = resolveCookieFilePath(file);
+    const existed = existsSync(path);
+    if (existed) unlinkSync(path);
+    const result = { path, removed: existed };
+    if (opts.json) output(result, true);
+    else console.log(existed ? kleur.green(`Removed: ${path}`) : kleur.yellow(`Not found: ${path}`));
   } catch (err) {
     handleError(err);
   }
