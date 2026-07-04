@@ -45,6 +45,16 @@ export class XhsClient {
     this.platform = platform;
   }
 
+  /** Which backend this client talks to ("xhs" | "rednote"). */
+  get platformId(): PlatformConfig["id"] {
+    return this.platform.id;
+  }
+
+  /** Human label for the active backend. */
+  get platformLabel(): string {
+    return this.platform.id === "rednote" ? "RedNote (global)" : "Xiaohongshu";
+  }
+
   private baseHeaders(): Record<string, string> {
     return {
       "user-agent": USER_AGENT,

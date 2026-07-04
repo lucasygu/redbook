@@ -378,6 +378,27 @@ export async function extractCookies(
 }
 
 /**
+ * Lightweight, non-throwing cookie probe for platform auto-detection.
+ * Reads only via sweet-cookie (no CDP fallback, no keychain retries, no logs)
+ * for a specific cookie domain (via cookieUrl). Returns null if the required
+ * cookies (a1 + web_session) are not present for that domain.
+ *
+ * Used to check both xiaohongshu.com and rednote.com and decide which one the
+ * user is actually logged into, without side effects or noise.
+ */
+export async function probeCookies(
+  source: CookieSource,
+  chromeProfile: string | undefined,
+  cookieUrl: string
+): Promise<XhsCookies | null> {
+  try {
+    return await extractViaSweetCookie(source, chromeProfile, () => {}, cookieUrl);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Format cookies as a cookie header string: "a1=xxx; web_session=yyy; ..."
  */
 export function cookiesToString(cookies: XhsCookies): string {

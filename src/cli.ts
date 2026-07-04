@@ -33,6 +33,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { extractCookies, parseCookieString, type CookieSource } from "./lib/cookies.js";
 import { resolvePlatform } from "./lib/platform.js";
+import { detectPlatform, detectPlatformForCookies } from "./lib/detect.js";
 import { XhsClient, XhsApiError } from "./lib/client.js";
 import { analyzeViral, formatViralAnalysis } from "./lib/analyze.js";
 import {
@@ -75,12 +76,11 @@ function addCookieOption(cmd: Command): Command {
     )
     .option(
       "--platform <name>",
-      "Which backend: 'xhs' (mainland xiaohongshu.com) or 'rednote' (global rednote.com)",
-      "xhs"
+      "Force backend: 'xhs' (mainland xiaohongshu.com) or 'rednote' (global rednote.com). Default: auto-detect from your login."
     )
     .option(
       "--global",
-      "Shorthand for --platform rednote (the international RedNote app)"
+      "Force the global RedNote backend (shorthand for --platform rednote)"
     );
 }
 
@@ -95,24 +95,38 @@ function addUserPageOptions(cmd: Command): Command {
 }
 
 async function getClient(cookieSource: string, chromeProfile?: string, cookieString?: string, platform?: string): Promise<XhsClient> {
-  const platformConfig = resolvePlatform(platform);
-  if (platformConfig.id === "rednote") {
-    console.error(kleur.dim("Platform: RedNote (global, rednote.com)."));
-  }
+  // An explicit choice (--platform / --global / REDBOOK_PLATFORM) skips detection.
+  const explicit = platform || process.env.REDBOOK_PLATFORM;
+
+  // ── Manual cookie string ──
   if (cookieString) {
     const cookies = parseCookieString(cookieString);
     if (!cookies.a1 || !cookies.web_session) {
       console.error(kleur.red(
         "Cookie string must contain at least 'a1' and 'web_session'. " +
-        `Copy them from Chrome DevTools > Application > Cookies > ${platformConfig.homeUrl}`
+        "Copy them from Chrome DevTools > Application > Cookies."
       ));
       process.exit(1);
     }
     console.error(kleur.dim("Using manual cookie string."));
-    return new XhsClient(cookies, platformConfig);
+    const cfg = explicit ? resolvePlatform(explicit) : await detectPlatformForCookies(cookies);
+    return new XhsClient(cookies, cfg);
   }
-  const cookies = await extractCookies(cookieSource as CookieSource, chromeProfile, platformConfig.cookieUrl);
-  return new XhsClient(cookies, platformConfig);
+
+  // ── Explicit platform ──
+  if (explicit) {
+    const cfg = resolvePlatform(explicit);
+    if (cfg.id === "rednote") console.error(kleur.dim("Platform: RedNote (global, rednote.com)."));
+    const cookies = await extractCookies(cookieSource as CookieSource, chromeProfile, cfg.cookieUrl);
+    return new XhsClient(cookies, cfg);
+  }
+
+  // ── Auto-detect (default): find whichever of xiaohongshu.com / rednote.com
+  //    the user is actually logged into. ──
+  const det = await detectPlatform(cookieSource as CookieSource, chromeProfile);
+  const cookies = det.cookies
+    ?? await extractCookies(cookieSource as CookieSource, chromeProfile, det.platform.cookieUrl);
+  return new XhsClient(cookies, det.platform);
 }
 
 function output(data: unknown, json: boolean): void {
@@ -149,7 +163,7 @@ whoamiCmd.action(async (opts) => {
       output(info, true);
     } else {
       const user = info as Record<string, unknown>;
-      console.log(kleur.green("Connected to Xiaohongshu"));
+      console.log(kleur.green(`Connected to ${client.platformLabel}`));
       console.log(`  User: ${kleur.bold(String(user.nickname ?? user.nick_name ?? "unknown"))}`);
       console.log(`  ID:   ${user.user_id ?? "unknown"}`);
       if (user.red_id) console.log(`  RedID: ${user.red_id}`);

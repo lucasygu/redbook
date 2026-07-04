@@ -1072,8 +1072,8 @@ redbook post --title "测试" --body "..." --images img.png --private --json
 All commands accept:
 - `--cookie-source <browser>`: `chrome` (default), `safari`, `firefox`
 - `--chrome-profile <name>`: Chrome profile directory name (e.g., "Profile 1"). Auto-discovered if omitted.
-- `--platform <name>`: `xhs` (default, mainland xiaohongshu.com) or `rednote` (global rednote.com)
-- `--global`: shorthand for `--platform rednote`
+- `--platform <name>`: force `xhs` (mainland) or `rednote` (global). **Default: auto-detect** which one you're logged into — see [Mainland vs Global](#mainland-xiaohongshu-vs-global-rednote).
+- `--global`: force the global RedNote backend (= `--platform rednote`)
 - `--json`: Output as JSON
 
 ---
@@ -1082,24 +1082,32 @@ All commands accept:
 
 XHS runs **two separate backends that do NOT share sessions or cookies**:
 
-| | Mainland (default) | Global |
+| | Mainland | Global |
 |---|---|---|
 | App / site | 小红书 / `xiaohongshu.com` | RedNote / `rednote.com` |
 | API host | `edith.xiaohongshu.com` | `webapi.rednote.com` |
 | Cookie domain | `.xiaohongshu.com` | `.rednote.com` |
-| Select with | (default) | `--global` or `--platform rednote` |
 
-If you are logged into the **global RedNote** app (common outside mainland China — the account that went viral as "RedNote" / "TikTok refugees"), you **must** pass `--global`, or every call returns `guest` / `登录已过期 (-100)` because the CLI is talking to the wrong backend with the wrong cookies.
+RedNote routes you to mainland vs global **by IP/region**, and you can only be signed into one at a time on a machine — so **the CLI auto-detects which one you're logged into**. You normally pass **no flag at all**:
 
 ```bash
-redbook whoami --global                 # confirms you're logged into RedNote
-redbook search "AI" --global --json     # search the global backend
-redbook feed --global --json            # global home feed
+redbook whoami            # auto-detects mainland vs global, then shows your account
+redbook search "AI"       # runs against whichever backend you're logged into
 ```
 
-The web signing (x-s/x-t) algorithm is **identical** across both — only the host + cookie domain differ. `--cookie-source` / `--chrome-profile` still apply.
+**How detection works:** it probes both cookie domains; if only one has a session it uses that, and if both have cookies (the unused domain often keeps a stale guest cookie) it verifies which is actually logged in via one lightweight `/user/me` call. The result is cached in `~/.redbook/platform-cache.json` (keyed by a cookie fingerprint), so it doesn't re-hit the API every command and self-invalidates when you log in/out. You'll see a dim `Platform: … [auto-detected|cached]` line on stderr.
 
-**Known gaps on `--global`** (as of the port):
+**Override** only if you need to force one (rare):
+
+```bash
+redbook whoami --global            # force global RedNote (= --platform rednote)
+redbook whoami --platform xhs      # force mainland
+# or: export REDBOOK_PLATFORM=rednote
+```
+
+The web signing (x-s/x-t) algorithm is **identical** across both — only the host + cookie domain differ.
+
+**Known gaps on the global backend:**
 - `user-posts` / `user` may need a fresh profile `xsec_token`; pass a full profile URL or `--xsec-token` if a bare userId returns `code -1`.
 - `health` (note throttle levels) needs creator-dashboard cookies; log into the RedNote creator dashboard first.
 

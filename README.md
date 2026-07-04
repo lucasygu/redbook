@@ -488,11 +488,11 @@ redbook post --title "测试" --body "..." --images img.png --private
 | `--cookie-source <browser>` | Browser to read cookies from (chrome, safari, firefox) | `chrome` |
 | `--chrome-profile <name>` | Chrome profile directory name (e.g., "Profile 1"). Auto-detected if omitted. | auto |
 | `--cookie-string <cookies>` | Manual cookie string: `"a1=VALUE; web_session=VALUE"` (from Chrome DevTools) | none |
-| `--platform <name>` | Backend: `xhs` (mainland xiaohongshu.com) or `rednote` (global rednote.com) | `xhs` |
-| `--global` | Shorthand for `--platform rednote` (the international RedNote app) | — |
+| `--platform <name>` | Force backend: `xhs` (mainland) or `rednote` (global). Omit to auto-detect. | auto |
+| `--global` | Force the global RedNote backend (= `--platform rednote`) | — |
 | `--json` | Output as JSON | `false` |
 
-> **Global RedNote users:** if you're logged into the international **RedNote** app (`rednote.com`, not mainland `xiaohongshu.com`), add `--global` to every command. The two are separate backends with separate sessions — without `--global` you'll get `guest` / `登录已过期`. The signing algorithm is identical; only the API host (`webapi.rednote.com`) and cookie domain (`.rednote.com`) differ.
+> **Mainland 小红书 vs global RedNote — handled automatically.** These are two separate backends (`xiaohongshu.com` / `edith.xiaohongshu.com` vs `rednote.com` / `webapi.rednote.com`) with separate sessions and cookie domains; RedNote routes you to one by IP/region and you can only be signed into one at a time. The CLI **auto-detects which one you're logged into** (probing both cookie domains, verifying with one `/user/me` call when both have cookies, then caching the result in `~/.redbook/`), so you normally pass **no flag**. Use `--global` / `--platform xhs` only to force one.
 
 ### User Profile Options
 
