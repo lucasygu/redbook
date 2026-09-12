@@ -39,11 +39,17 @@ const A3_PREFIX = [2, 97, 51, 16];
 const HASH_IV: [number, number, number, number] = [1831565813, 461845907, 2246822507, 3266489909];
 const MAX_32BIT = 0xFFFFFFFF;
 
-const SDK_VERSION = "4.2.6";
+const SDK_VERSION = "4.3.5";
 const APP_ID = "xhs-pc-web";
 const PLATFORM = "Windows";
 const X3_PREFIX = "mns0301_";
 const XYS_PREFIX = "XYS_";
+const XYW_PREFIX = "XYW_";
+
+// XYW_ format (AES-128-CBC), accepted by data APIs that reject XYS_ with HTTP 406
+const XYW_AES_KEY = "7cc4adla5ay0701v";
+const XYW_AES_IV = "4uzjr7mbsibcaldp";
+const XYW_ENV_FLAGS = "0|0|0|1|0|0|1|0|0|0|1|0|0|0|0|1|0|0|1";
 
 const B1_SECRET_KEY = "xhswebmplfbt";
 const HEX_CHARS = "abcdef0123456789";
@@ -70,7 +76,7 @@ const SIGNATURE_DATA_TEMPLATE = {
   x1: APP_ID,
   x2: PLATFORM,
   x3: "",
-  x4: "",
+  x4: "object",
 };
 
 const USER_AGENT =
@@ -195,24 +201,16 @@ function customHashV2(inputBytes: number[]): number[] {
   return result;
 }
 
-function extractApiPath(uriWithData: string): string {
-  const bracePos = uriWithData.indexOf("{");
-  const questionPos = uriWithData.indexOf("?");
-
-  if (bracePos !== -1 && questionPos !== -1) {
-    return uriWithData.substring(0, Math.min(bracePos, questionPos));
-  } else if (bracePos !== -1) {
-    return uriWithData.substring(0, bracePos);
-  } else if (questionPos !== -1) {
-    return uriWithData.substring(0, questionPos);
-  }
-  return uriWithData;
-}
-
 // ─── Payload Builder ────────────────────────────────────────────────────────
 
+/**
+ * @param hexParameter MD5 of the content string (URI + query or JSON body)
+ * @param md5PathHex   MD5 fed into the A3 hash — the full content string for GET,
+ *                     the bare URI path for POST (xhshow sdk 4.3.3+)
+ */
 function buildPayloadArray(
   hexParameter: string,
+  md5PathHex: string,
   a1Value: string,
   contentString: string,
   timestamp?: number
@@ -284,12 +282,7 @@ function buildPayloadArray(
   }
 
   // A3 segment [124-143] (20 bytes) — new in v4.3.1
-  const apiPath = extractApiPath(contentString);
-  const apiPathMd5 = crypto.createHash("md5").update(apiPath, "utf-8").digest("hex");
-  const md5PathBytes: number[] = [];
-  for (let i = 0; i < 32; i += 2) {
-    md5PathBytes.push(parseInt(apiPathMd5.substring(i, i + 2), 16));
-  }
+  const md5PathBytes = Array.from(hexToBytes(md5PathHex));
   const hashInput = [...tsBytes, ...md5PathBytes]; // 8 + 16 = 24 bytes
   const hashOutput = customHashV2(hashInput);
   payload.push(...A3_PREFIX);
@@ -601,6 +594,17 @@ function extractUri(url: string): string {
   }
 }
 
+/**
+ * Percent-encode a query value the way the web client signs it
+ * (Python `urllib.parse.quote(value, safe=",")`): everything except
+ * `A-Za-z0-9_.-~` and `,` is escaped, non-ASCII as UTF-8.
+ */
+function encodeQueryValue(value: string): string {
+  return encodeURIComponent(value)
+    .replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replace(/%2C/g, ",");
+}
+
 function buildGetUri(
   uri: string,
   params?: Record<string, string | number | string[]>
@@ -609,13 +613,35 @@ function buildGetUri(
   const parts: string[] = [];
   for (const [key, value] of Object.entries(params)) {
     const strVal = Array.isArray(value) ? value.join(",") : String(value);
-    const encoded = strVal.replace(/=/g, "%3D");
-    parts.push(`${key}=${encoded}`);
+    parts.push(`${key}=${encodeQueryValue(strVal)}`);
   }
   return `${uri}?${parts.join("&")}`;
 }
 
+// ─── XYW Signature ──────────────────────────────────────────────────────────
+
+function buildXywSignature(contentString: string, a1: string, tsMs: number): string {
+  const x1 = crypto.createHash("md5").update(`url=${contentString}`, "utf-8").digest("hex");
+  const message = `x1=${x1};x2=${XYW_ENV_FLAGS};x3=${a1};x4=${tsMs};`;
+
+  // AES-128-CBC (PKCS#7) over the base64 of the message
+  const cipher = crypto.createCipheriv("aes-128-cbc", Buffer.from(XYW_AES_KEY), Buffer.from(XYW_AES_IV));
+  const plaintext = Buffer.from(message, "utf-8").toString("base64");
+  const payload = Buffer.concat([cipher.update(plaintext, "utf-8"), cipher.final()]).toString("hex");
+
+  const envelope = JSON.stringify({
+    signSvn: "56",
+    signType: "x2",
+    appId: APP_ID,
+    signVersion: "1",
+    payload,
+  });
+  return XYW_PREFIX + Buffer.from(envelope, "utf-8").toString("base64");
+}
+
 // ─── Public API ─────────────────────────────────────────────────────────────
+
+export type SignFormat = "xys" | "xyw";
 
 export interface SignHeaders {
   "x-s": string;
@@ -627,6 +653,8 @@ export interface SignHeaders {
 
 /**
  * Generate all signing headers for a main API (edith.xiaohongshu.com) request.
+ * `signFormat: "xyw"` produces the AES-based XYW_ x-s that some data APIs
+ * accept when they reject XYS_ with HTTP 406.
  */
 export function signMainApi(
   method: "GET" | "POST",
@@ -635,7 +663,8 @@ export function signMainApi(
   params?: Record<string, string | number | string[]>,
   payload?: Record<string, unknown>,
   timestamp?: number,
-  signLocation?: string
+  signLocation?: string,
+  signFormat: SignFormat = "xys"
 ): SignHeaders {
   const a1 = cookies.a1;
   if (!a1) throw new Error("Missing 'a1' in cookies");
@@ -656,16 +685,25 @@ export function signMainApi(
     .update(contentString, "utf-8")
     .digest("hex");
 
-  // Build payload array and sign
-  const payloadArray = buildPayloadArray(dValue, a1, contentString, ts);
-  const xorResult = xorTransform(payloadArray);
-  const x3Signature = x3Base64Encode(xorResult.slice(0, PAYLOAD_LENGTH));
+  let xs: string;
+  if (signFormat === "xyw") {
+    xs = buildXywSignature(contentString, a1, tsMs);
+  } else {
+    // A3 hash input: full content string for GET, bare URI path for POST
+    const md5PathHex = method === "GET"
+      ? dValue
+      : crypto.createHash("md5").update(uriPath, "utf-8").digest("hex");
 
-  // Build x-s
-  const signatureData = { ...SIGNATURE_DATA_TEMPLATE };
-  signatureData.x3 = X3_PREFIX + x3Signature;
-  const signatureJson = JSON.stringify(signatureData);
-  const xs = XYS_PREFIX + customBase64Encode(signatureJson);
+    // Build payload array and sign
+    const payloadArray = buildPayloadArray(dValue, md5PathHex, a1, contentString, ts);
+    const xorResult = xorTransform(payloadArray);
+    const x3Signature = x3Base64Encode(xorResult.slice(0, PAYLOAD_LENGTH));
+
+    // Build x-s
+    const signatureData = { ...SIGNATURE_DATA_TEMPLATE };
+    signatureData.x3 = X3_PREFIX + x3Signature;
+    xs = XYS_PREFIX + customBase64Encode(JSON.stringify(signatureData));
+  }
 
   // Build x-s-common
   const fingerprint = generateFingerprint(cookies, USER_AGENT, signLocation);

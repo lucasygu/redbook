@@ -1204,6 +1204,9 @@ The `analyze-viral` command handles this automatically. When parsing `--json` ou
 | "Session expired" | Cookie too old | Re-login in Chrome |
 | "NeedVerify" / captcha | Anti-bot triggered | Wait and retry, or reduce request frequency |
 | "IP blocked" (300012) | Rate limited | Wait or switch network |
+| "Request signature rejected (HTTP 406)" | XHS changed its web signing | Update redbook (`npm i -g @lucasygu/redbook@latest`); don't retry in a loop |
+| "No API permission for this account" (-104) | Account-level restriction by XHS (often on `search`), not a cookie/signing bug | Confirm `whoami` works, then use another account or the browser. Don't keep retrying |
+| "looks like a 小红书号 (Red ID)" | Passed the numeric Red ID instead of the user ID | Use the 24-char ID from `/user/profile/<id>`, or the full profile URL |
 
 ---
 

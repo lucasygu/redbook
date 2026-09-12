@@ -332,7 +332,7 @@ function output(data: unknown, json: boolean): void {
   }
 }
 
-function handleError(err: unknown): never {
+function handleError(err: unknown): void {
   if (err instanceof XhsApiError) {
     console.error(kleur.red(`Error: ${err.message}`));
     if (err.code) console.error(kleur.dim(`Code: ${err.code}`));
@@ -341,7 +341,9 @@ function handleError(err: unknown): never {
   } else {
     console.error(kleur.red("Unknown error"));
   }
-  process.exit(1);
+  // exitCode instead of process.exit(): exiting while fetch sockets are still
+  // closing trips a libuv assertion on Windows (UV_HANDLE_CLOSING).
+  process.exitCode = 1;
 }
 
 // ─── whoami ─────────────────────────────────────────────────────────────────
@@ -772,7 +774,8 @@ accountReportCmd.action(async (users: string[] | undefined, opts) => {
     const inputs = collectAccountInputs(users ?? [], opts.file);
     if (inputs.length === 0) {
       console.error(kleur.red("Provide at least one account ID/profile URL, or use --file <path>."));
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     const month = parseReportMonth(opts.month);
@@ -786,14 +789,16 @@ accountReportCmd.action(async (users: string[] | undefined, opts) => {
 
     for (let idx = 0; idx < inputs.length; idx++) {
       const input = inputs[idx];
-      const user = parseUserProfileArg(input, opts);
+      let userId: string | undefined;
       try {
+        const user = parseUserProfileArg(input, opts);
+        userId = user.userId;
         const report = await buildAccountReport(client, input, user, month, maxPages, delayMs);
         reports.push(report);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        errors.push({ input, userId: user.userId, error: message });
-        console.error(kleur.red(`Failed ${user.userId}: ${message}`));
+        errors.push({ input, userId, error: message });
+        console.error(kleur.red(`Failed ${userId ?? input}: ${message}`));
       }
 
       if (idx < inputs.length - 1 && delayMs > 0) {
@@ -860,7 +865,8 @@ postCmd.action(async (opts) => {
 
     if (imageFiles.length === 0) {
       console.error(kleur.red("At least one image is required. Use --images <path>"));
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     // Upload images
@@ -964,7 +970,8 @@ favoritesCmd.action(async (userId, opts) => {
       userId = String(me.user_id ?? "");
       if (!userId) {
         console.error(kleur.red("Could not determine current user ID"));
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
     }
 
@@ -1436,7 +1443,8 @@ analyzeViralCmd.action(async (url, opts) => {
 
     if (!userId) {
       console.error(kleur.red("Could not extract author user_id from note"));
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     // 2. Fetch comments, author posts, and author info in parallel
@@ -1525,7 +1533,8 @@ viralTemplateCmd.action(async (urls: string[], opts) => {
   try {
     if (urls.length > 3) {
       console.error(kleur.red("Maximum 3 URLs allowed"));
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
@@ -1611,7 +1620,8 @@ viralTemplateCmd.action(async (urls: string[], opts) => {
 
     if (analyses.length === 0) {
       console.error(kleur.red("No notes could be analyzed"));
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     const template = extractTemplate(analyses);
@@ -1926,6 +1936,14 @@ function parseUserProfileArg(
     xsecSource = url.searchParams.get("xsec_source") ?? xsecSource;
   } catch {
     // Raw user id; optional token/source may still come from flags.
+  }
+
+  // Red IDs (小红书号) are all digits; the API needs the 24-char hex user ID.
+  if (/^\d+$/.test(userId)) {
+    throw new Error(
+      `"${userId}" looks like a 小红书号 (Red ID), not a user ID. ` +
+      "Use the 24-character ID from the profile URL (/user/profile/<id>), or pass the full profile URL."
+    );
   }
 
   if (xsecToken && !xsecSource) xsecSource = "pc_search";

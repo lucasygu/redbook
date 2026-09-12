@@ -5,7 +5,7 @@
  * with proper signing, headers, and error handling.
  */
 
-import { signMainApi, USER_AGENT, buildGetUri, extractUri } from "./signing.js";
+import { signMainApi, USER_AGENT, buildGetUri, extractUri, type SignFormat } from "./signing.js";
 import { signCreator } from "./creator-signing.js";
 import { cookiesToString, type XhsCookies } from "./cookies.js";
 import { PLATFORMS, type PlatformConfig } from "./platform.js";
@@ -14,7 +14,8 @@ export class XhsApiError extends Error {
   constructor(
     message: string,
     public code?: number | string,
-    public response?: unknown
+    public response?: unknown,
+    public status?: number
   ) {
     super(message);
     this.name = "XhsApiError";
@@ -69,14 +70,22 @@ export class XhsClient {
     uri: string,
     params?: Record<string, string | number | string[]>
   ): Promise<unknown> {
-    const signHeaders = signMainApi("GET", uri, this.cookies, params, undefined, undefined, this.platform.signLocation);
     const fullUri = buildGetUri(uri, params);
     const url = `${this.platform.edithHost}${fullUri}`;
-
-    const res = await fetch(url, {
+    const send = (signFormat: SignFormat) => fetch(url, {
       method: "GET",
-      headers: { ...this.baseHeaders(), ...signHeaders },
+      headers: {
+        ...this.baseHeaders(),
+        ...signMainApi("GET", uri, this.cookies, params, undefined, undefined, this.platform.signLocation, signFormat),
+      },
     });
+
+    let res = await send("xys");
+    // Some data endpoints reject XYS_ signatures with 406 — retry once with XYW_.
+    if (res.status === 406) {
+      await res.text();
+      res = await send("xyw");
+    }
 
     return this.handleResponse(res);
   }
@@ -174,7 +183,8 @@ export class XhsClient {
       throw new XhsApiError(
         `Non-JSON response: ${text.substring(0, 200)}`,
         res.status,
-        text
+        text,
+        res.status
       );
     }
 
@@ -183,6 +193,23 @@ export class XhsClient {
     }
 
     const code = data.code as string | number | undefined;
+    if (res.status === 406) {
+      throw new XhsApiError(
+        "Request signature rejected (HTTP 406) — XHS may have changed its web signing. Update redbook: npm i -g @lucasygu/redbook@latest",
+        code,
+        data,
+        res.status
+      );
+    }
+    if (code === -104) {
+      const msg = typeof data.msg === "string" && data.msg ? `: ${data.msg}` : "";
+      throw new XhsApiError(
+        `No API permission for this account (-104${msg}). XHS restricts some endpoints per account (often search) — not a cookie or signing problem. Try another account or the browser.`,
+        code,
+        data,
+        res.status
+      );
+    }
     if (code === 300012) {
       throw new XhsApiError("IP blocked by XHS", code, data);
     }
@@ -249,9 +276,11 @@ export class XhsClient {
       try {
         return await this.mainApiGet(endpoint, params);
       } catch (err) {
+        // 406 is a signature rejection, not a missing route — don't spend another request on it
         const canFallback =
           idx < endpoints.length - 1
           && err instanceof XhsApiError
+          && err.status !== 406
           && (err.code === -1 || err.code === 404);
         if (!canFallback) throw err;
       }
