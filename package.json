@@ -1,6 +1,6 @@
 {
   "name": "@lucasygu/redbook",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "CLI tool for Xiaohongshu (Red Note) - read and post via private API",
   "type": "module",
   "main": "./dist/lib/client.js",
