@@ -1118,7 +1118,7 @@ redbook post --title "测试" --body "..." --images img.png --private --json
 ### Global Options
 
 All commands accept:
-- `--cookie-source <browser>`: `chrome` (default), `safari`, `firefox`
+- `--cookie-source <browser>`: `chrome` (default), `safari`, `firefox`. When passed explicitly, live cookies are read from that browser and **override the saved cookie file** (`~/.redbook/cookies.json`).
 - `--chrome-profile <name>`: Chrome profile directory name (e.g., "Profile 1"). Auto-discovered if omitted.
 - `--cookie-string <cookies>`: manual cookie string, e.g. `"a1=VALUE; web_session=VALUE"`
 - `--session <name>`: use a saved named session (`~/.redbook/sessions/<name>.json`); env var `REDBOOK_SESSION`

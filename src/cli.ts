@@ -85,8 +85,7 @@ function addCookieOption(cmd: Command): Command {
   return cmd
     .option(
       "--cookie-source <browser>",
-      "Browser to read cookies from (chrome, safari, firefox)",
-      "chrome"
+      "Browser to read cookies from (chrome, safari, firefox). Default: chrome."
     )
     .option(
       "--chrome-profile <name>",
@@ -535,6 +534,26 @@ async function getClient(opts: CookieOptions = {}): Promise<XhsClient> {
     const saved = loadSavedCookieFile(savedCookiePath);
     console.error(kleur.dim(`Using saved cookie file: ${saved.path}`));
     return clientFromSavedFile(saved, explicit);
+  }
+
+  // ── Explicit cookie source (--cookie-source chrome/safari/firefox) ──
+  // Asking for a browser means "read live cookies from it". That has to beat the
+  // saved cookie file, otherwise the flag is silently ignored whenever
+  // ~/.redbook/cookies.json exists and the caller can never reach the live session.
+  // Precedence: --cookie-string > --session/--cookie-file > --cookie-source >
+  // configured default session > saved cookie file > auto-detect.
+  if (opts.cookieSource) {
+    const source = opts.cookieSource as CookieSource;
+    if (explicit) {
+      const cfg = resolvePlatform(explicit);
+      if (cfg.id === "rednote") console.error(kleur.dim("Platform: RedNote (global, rednote.com)."));
+      const cookies = await extractCookies(source, opts.chromeProfile, cfg.cookieUrl);
+      return new XhsClient(cookies, cfg);
+    }
+    const det = await detectPlatform(source, opts.chromeProfile);
+    const cookies = det.cookies
+      ?? await extractCookies(source, opts.chromeProfile, det.platform.cookieUrl);
+    return new XhsClient(cookies, det.platform);
   }
 
   // ── Configured default session (`redbook auth use <name>`) ──

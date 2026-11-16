@@ -148,7 +148,7 @@ redbook post --title "测试" --body "..." --images img.png --private
 
 | 选项 | 说明 | 默认值 |
 |------|------|--------|
-| `--cookie-source <浏览器>` | Cookie 来源浏览器（chrome, safari, firefox） | `chrome` |
+| `--cookie-source <浏览器>` | Cookie 来源浏览器（chrome, safari, firefox）。**显式指定时从该浏览器读实时 Cookie，会覆盖已保存的 cookie 文件** | `chrome` |
 | `--chrome-profile <名称>` | Chrome 配置文件目录名（如 "Profile 1"），默认自动检测 | 自动 |
 | `--cookie-string <cookies>` | 手动传入 Cookie 字符串：`"a1=值; web_session=值"`（从 Chrome DevTools 复制） | 无 |
 | `--session <名字>` | 使用命名 session（`~/.redbook/sessions/<名字>.json`），也可用环境变量 `REDBOOK_SESSION` | 无 |
@@ -159,7 +159,7 @@ redbook post --title "测试" --body "..." --images img.png --private
 
 ### 保存 Cookie / 云端使用
 
-如果在 OpenClaw、云服务器或 CI 里运行，不想每条命令都加 `--cookie-string`，可以把 Cookie 保存成文件。普通命令会按这个顺序读取 Cookie：`--cookie-string` → `REDBOOK_COOKIE_STRING` → `--session` / `REDBOOK_SESSION` → `--cookie-file` / `REDBOOK_COOKIE_FILE` → 默认 session（`redbook auth use` 设置） → `~/.redbook/cookies.json` → 本机浏览器。
+如果在 OpenClaw、云服务器或 CI 里运行，不想每条命令都加 `--cookie-string`，可以把 Cookie 保存成文件。普通命令会按这个顺序读取 Cookie：`--cookie-string` → `REDBOOK_COOKIE_STRING` → `--session` / `REDBOOK_SESSION` → `--cookie-file` / `REDBOOK_COOKIE_FILE` → `--cookie-source <浏览器>`（显式指定时从该浏览器读实时 Cookie） → 默认 session（`redbook auth use` 设置） → `~/.redbook/cookies.json` → 本机浏览器。
 
 **多账号 session：** 可以保存多个账号的 Cookie 到 `~/.redbook/sessions/<名字>.json`。用 `redbook auth use <名字>` 切换默认账号，之后所有命令都不用额外带参数；临时换账号用 `--session <名字>`。
 
@@ -542,7 +542,7 @@ redbook post --title "测试" --body "..." --images img.png --private
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--cookie-source <browser>` | Browser to read cookies from (chrome, safari, firefox) | `chrome` |
+| `--cookie-source <browser>` | Browser to read cookies from (chrome, safari, firefox). **When passed explicitly, live cookies are read from that browser and override the saved cookie file.** | `chrome` |
 | `--chrome-profile <name>` | Chrome profile directory name (e.g., "Profile 1"). Auto-detected if omitted. | auto |
 | `--cookie-string <cookies>` | Manual cookie string: `"a1=VALUE; web_session=VALUE"` (from Chrome DevTools) | none |
 | `--session <name>` | Use a named session (`~/.redbook/sessions/<name>.json`); env var `REDBOOK_SESSION` | none |
