@@ -19,9 +19,17 @@ export interface XhsCookies {
 
 export type CookieSource = "chrome" | "safari" | "firefox";
 
-interface ChromeProfileInfo {
+export interface ChromeProfileInfo {
   dirName: string;
   displayName: string;
+}
+
+/**
+ * Public wrapper around profile discovery for `redbook auth scan`.
+ * Returns profiles sorted with "Default" first; [] when Chrome is not installed.
+ */
+export function listChromeProfiles(): ChromeProfileInfo[] {
+  return discoverChromeProfiles();
 }
 
 /**

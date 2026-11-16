@@ -1063,6 +1063,26 @@ redbook auth export
 # Or save a cookie string copied from Chrome DevTools
 redbook auth save --cookie-string "a1=VALUE; web_session=VALUE"
 
+# Scan all Chrome profiles and identify each account
+# Default makes 1 /user/me API call per logged-in profile; --offline skips identification
+redbook auth scan
+# Import as chrome-<profile> sessions; same-named sessions are overwritten;
+# unverified sessions are skipped unless --force is passed
+redbook auth scan --import
+
+# Multi-account sessions (~/.redbook/sessions/<name>.json)
+redbook auth export --session acc2 --chrome-profile "Profile 2"
+redbook auth save --session acc2 --cookie-string "a1=VALUE; web_session=VALUE"
+redbook auth list
+
+# Switch the default account (no --session needed afterwards)
+redbook auth use acc2
+redbook search "AI编程" --json
+redbook auth use --clear   # unset, fall back to auto-detection
+
+# One-off override
+redbook whoami --session acc2
+
 # Inspect without printing secret cookie values
 redbook auth path
 redbook auth inspect --json
@@ -1071,7 +1091,13 @@ redbook auth inspect --json
 redbook auth clear
 ```
 
-Normal commands resolve cookies in this order: `--cookie-string`, `REDBOOK_COOKIE_STRING`, `REDBOOK_COOKIE_FILE`, `~/.redbook/cookies.json`, then browser extraction. Saved cookie files are plaintext login credentials written with `0600` permissions; never commit them or include them in logs.
+Normal commands resolve cookies in this order: `--cookie-string`, `REDBOOK_COOKIE_STRING`, `--session` / `REDBOOK_SESSION`, `--cookie-file` / `REDBOOK_COOKIE_FILE`, the default session set by `redbook auth use`, `~/.redbook/cookies.json`, then browser extraction. Saved cookie files are plaintext login credentials written with `0600` permissions; never commit them or include them in logs.
+
+**`auth scan` options:**
+- `--import`: save each found profile as a session (`chrome-<profile>`); same-named sessions are overwritten; unverified sessions are skipped
+- `--offline`: skip account identification (no `/user/me` API calls)
+- `--force`: with `--import`, also import sessions that could not be verified
+- `--json`: machine-readable output (`source`, `verified`, `profiles[]`)
 
 ### `redbook post` (Limited)
 
@@ -1095,6 +1121,8 @@ All commands accept:
 - `--cookie-source <browser>`: `chrome` (default), `safari`, `firefox`
 - `--chrome-profile <name>`: Chrome profile directory name (e.g., "Profile 1"). Auto-discovered if omitted.
 - `--cookie-string <cookies>`: manual cookie string, e.g. `"a1=VALUE; web_session=VALUE"`
+- `--session <name>`: use a saved named session (`~/.redbook/sessions/<name>.json`); env var `REDBOOK_SESSION`
+- `--cookie-file <path>`: use a specific saved cookie file; env var `REDBOOK_COOKIE_FILE`
 - `--platform <name>`: force `xhs` (mainland) or `rednote` (global). **Default: auto-detect** which one you're logged into — see [Mainland vs Global](#mainland-xiaohongshu-vs-global-rednote).
 - `--global`: force the global RedNote backend (= `--platform rednote`)
 - `--json`: Output as JSON
