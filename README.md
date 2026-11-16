@@ -148,16 +148,20 @@ redbook post --title "测试" --body "..." --images img.png --private
 
 | 选项 | 说明 | 默认值 |
 |------|------|--------|
-| `--cookie-source <浏览器>` | Cookie 来源浏览器（chrome, safari, firefox） | `chrome` |
+| `--cookie-source <浏览器>` | Cookie 来源浏览器（chrome, safari, firefox）。**显式指定时从该浏览器读实时 Cookie，会覆盖已保存的 cookie 文件** | `chrome` |
 | `--chrome-profile <名称>` | Chrome 配置文件目录名（如 "Profile 1"），默认自动检测 | 自动 |
 | `--cookie-string <cookies>` | 手动传入 Cookie 字符串：`"a1=值; web_session=值"`（从 Chrome DevTools 复制） | 无 |
+| `--session <名字>` | 使用命名 session（`~/.redbook/sessions/<名字>.json`），也可用环境变量 `REDBOOK_SESSION` | 无 |
+| `--cookie-file <路径>` | 使用指定的 Cookie 文件，也可用环境变量 `REDBOOK_COOKIE_FILE` | 无 |
 | `--platform <name>` | 强制后端：`xhs`（大陆）或 `rednote`（全球版），不传则自动检测 | 自动 |
 | `--global` | 强制使用全球版 RedNote 后端（等同 `--platform rednote`） | 无 |
 | `--json` | JSON 格式输出 | `false` |
 
 ### 保存 Cookie / 云端使用
 
-如果在 OpenClaw、云服务器或 CI 里运行，不想每条命令都加 `--cookie-string`，可以把 Cookie 保存成文件。普通命令会按这个顺序读取 Cookie：`--cookie-string` → `REDBOOK_COOKIE_STRING` → `REDBOOK_COOKIE_FILE` → `~/.redbook/cookies.json` → 本机浏览器。
+如果在 OpenClaw、云服务器或 CI 里运行，不想每条命令都加 `--cookie-string`，可以把 Cookie 保存成文件。普通命令会按这个顺序读取 Cookie：`--cookie-string` → `REDBOOK_COOKIE_STRING` → `--session` / `REDBOOK_SESSION` → `--cookie-file` / `REDBOOK_COOKIE_FILE` → `--cookie-source <浏览器>`（显式指定时从该浏览器读实时 Cookie） → 默认 session（`redbook auth use` 设置） → `~/.redbook/cookies.json` → 本机浏览器。
+
+**多账号 session：** 可以保存多个账号的 Cookie 到 `~/.redbook/sessions/<名字>.json`。用 `redbook auth use <名字>` 切换默认账号，之后所有命令都不用额外带参数；临时换账号用 `--session <名字>`。
 
 ```bash
 # 本地浏览器已登录时，导出到默认路径 ~/.redbook/cookies.json
@@ -170,6 +174,25 @@ redbook auth save --cookie-string "a1=值; web_session=值"
 redbook auth path
 redbook auth inspect
 
+# 一次性扫描所有 Chrome profile，自动识别每个 profile 里的账号
+# 默认对每个已登录 profile 调 1 次 /user/me 接口识别账号；--offline 可跳过识别（不联网）
+redbook auth scan
+# 导入为 chrome-<profile> session；同名会覆盖；未验证的默认跳过（--force 强制导入）
+redbook auth scan --import
+
+# 多账号：把不同账号存成命名 session（~/.redbook/sessions/<名字>.json）
+redbook auth export --session acc2 --chrome-profile "Profile 2"
+redbook auth save --session acc3 --cookie-string "a1=值; web_session=值"
+redbook auth list
+
+# 切换默认账号（之后不带 --session 也用这个账号）
+redbook auth use acc2
+redbook search "AI编程" --json
+redbook auth use --clear   # 取消默认，回到自动读取
+
+# 临时用别的账号（不改变默认）
+redbook whoami --session acc3
+
 # 上传 ~/.redbook/cookies.json 到云端后，普通命令会自动读取
 redbook whoami
 
@@ -179,6 +202,8 @@ redbook search "AI编程" --json
 ```
 
 Cookie 文件是明文登录凭据，默认写入权限为 `0600`。不要提交到 Git，也不要贴到日志里。需要撤销时可以删除文件或执行 `redbook auth clear`，然后在浏览器里退出登录/重新登录刷新会话。
+
+`auth scan` 参数：`--import` 把发现的 profile 存为 `chrome-<profile>` session（同名会覆盖，未验证的默认跳过）；`--offline` 跳过账号识别（不联网）；`--force` 配合 `--import` 连未验证的也导入；`--json` 输出机器可读 JSON。
 
 ### 用户主页选项
 
@@ -517,9 +542,11 @@ redbook post --title "测试" --body "..." --images img.png --private
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--cookie-source <browser>` | Browser to read cookies from (chrome, safari, firefox) | `chrome` |
+| `--cookie-source <browser>` | Browser to read cookies from (chrome, safari, firefox). **When passed explicitly, live cookies are read from that browser and override the saved cookie file.** | `chrome` |
 | `--chrome-profile <name>` | Chrome profile directory name (e.g., "Profile 1"). Auto-detected if omitted. | auto |
 | `--cookie-string <cookies>` | Manual cookie string: `"a1=VALUE; web_session=VALUE"` (from Chrome DevTools) | none |
+| `--session <name>` | Use a named session (`~/.redbook/sessions/<name>.json`); env var `REDBOOK_SESSION` | none |
+| `--cookie-file <path>` | Use a specific saved cookie file; env var `REDBOOK_COOKIE_FILE` | none |
 | `--platform <name>` | Force backend: `xhs` (mainland) or `rednote` (global). Omit to auto-detect. | auto |
 | `--global` | Force the global RedNote backend (= `--platform rednote`) | — |
 | `--json` | Output as JSON | `false` |
@@ -528,7 +555,9 @@ redbook post --title "测试" --body "..." --images img.png --private
 
 ### Saved Cookies / Cloud Use
 
-For OpenClaw, cloud servers, or CI, save cookies once so every command does not need `--cookie-string`. Normal commands resolve cookies in this order: `--cookie-string` → `REDBOOK_COOKIE_STRING` → `REDBOOK_COOKIE_FILE` → `~/.redbook/cookies.json` → local browser extraction.
+For OpenClaw, cloud servers, or CI, save cookies once so every command does not need `--cookie-string`. Normal commands resolve cookies in this order: `--cookie-string` → `REDBOOK_COOKIE_STRING` → `--session` / `REDBOOK_SESSION` → `--cookie-file` / `REDBOOK_COOKIE_FILE` → default session (set via `redbook auth use`) → `~/.redbook/cookies.json` → local browser extraction.
+
+**Multi-account sessions:** save each account's cookies to `~/.redbook/sessions/<name>.json`; switch the default account with `redbook auth use <name>` (no flag needed afterwards), and override per command with `--session <name>` — useful for rotating accounts when rate limits are a concern.
 
 ```bash
 # Export from a logged-in local browser to ~/.redbook/cookies.json
@@ -541,6 +570,26 @@ redbook auth save --cookie-string "a1=VALUE; web_session=VALUE"
 redbook auth path
 redbook auth inspect
 
+# Scan all Chrome profiles and identify each account
+# Default makes 1 /user/me API call per logged-in profile; --offline skips identification
+redbook auth scan
+# Import as chrome-<profile> sessions; same-named sessions are overwritten;
+# unverified sessions are skipped unless --force is passed
+redbook auth scan --import
+
+# Multi-account sessions (~/.redbook/sessions/<name>.json)
+redbook auth export --session acc2 --chrome-profile "Profile 2"
+redbook auth save --session acc2 --cookie-string "a1=VALUE; web_session=VALUE"
+redbook auth list
+
+# Switch the default account (no --session needed afterwards)
+redbook auth use acc2
+redbook search "AI编程" --json
+redbook auth use --clear   # unset, fall back to auto-detection
+
+# One-off override
+redbook whoami --session acc2
+
 # After uploading ~/.redbook/cookies.json to the cloud, commands auto-load it
 redbook whoami
 
@@ -550,6 +599,8 @@ redbook search "AI编程" --json
 ```
 
 The cookie file is a plaintext login credential and is written with `0600` permissions by default. Do not commit it or print it in logs. To revoke local reuse, remove it with `redbook auth clear`, then log out/in from the browser to rotate the session.
+
+**`auth scan` options:** `--import` saves each found profile as a `chrome-<profile>` session (same-named sessions are overwritten; unverified ones are skipped); `--offline` skips account identification (no API calls); `--force` with `--import` also imports unverified sessions; `--json` prints machine-readable output.
 
 ### User Profile Options
 

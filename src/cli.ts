@@ -6,6 +6,7 @@
  * Usage:
  *   redbook whoami --cookie-source chrome
  *   redbook search "Claude Code" --cookie-source chrome --json
+ *   redbook search "Claude Code" --session work --json
  *   redbook read <url> --cookie-source chrome --json
  *   redbook comments <url> --cookie-source chrome --json
  *   redbook user <user-id-or-profile-url> --cookie-source chrome --json
@@ -33,6 +34,8 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -41,11 +44,13 @@ import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   extractCookies,
+  listChromeProfiles,
   parseCookieString,
+  probeCookies,
   type CookieSource,
   type XhsCookies,
 } from "./lib/cookies.js";
-import { resolvePlatform, type PlatformId } from "./lib/platform.js";
+import { PLATFORMS, resolvePlatform, type PlatformId } from "./lib/platform.js";
 import { detectPlatform, detectPlatformForCookies } from "./lib/detect.js";
 import { XhsClient, XhsApiError } from "./lib/client.js";
 import { analyzeViral, formatViralAnalysis } from "./lib/analyze.js";
@@ -65,6 +70,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8"));
 const REDBOOK_DIR = join(homedir(), ".redbook");
 const DEFAULT_COOKIE_FILE = join(REDBOOK_DIR, "cookies.json");
+const SESSIONS_DIR = join(REDBOOK_DIR, "sessions");
+const CONFIG_FILE = join(REDBOOK_DIR, "config.json");
 
 const program = new Command();
 
@@ -78,8 +85,7 @@ function addCookieOption(cmd: Command): Command {
   return cmd
     .option(
       "--cookie-source <browser>",
-      "Browser to read cookies from (chrome, safari, firefox)",
-      "chrome"
+      "Browser to read cookies from (chrome, safari, firefox). Default: chrome."
     )
     .option(
       "--chrome-profile <name>",
@@ -88,6 +94,14 @@ function addCookieOption(cmd: Command): Command {
     .option(
       "--cookie-string <cookies>",
       'Manual cookie string: "a1=VALUE; web_session=VALUE" (from Chrome DevTools)'
+    )
+    .option(
+      "--session <name>",
+      "Use a saved cookie session (~/.redbook/sessions/<name>.json)"
+    )
+    .option(
+      "--cookie-file <path>",
+      "Use a specific saved cookie file"
     )
     .option(
       "--platform <name>",
@@ -137,11 +151,177 @@ function resolveCookieFilePath(filePath?: string): string {
   return isAbsolute(raw) ? raw : resolve(process.cwd(), raw);
 }
 
-function defaultCookieFileForRead(): string | null {
-  if (process.env.REDBOOK_COOKIE_FILE) {
-    return resolveCookieFilePath(process.env.REDBOOK_COOKIE_FILE);
+function resolveSessionName(name: string): string {
+  const trimmed = name.trim();
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(trimmed) ||
+    trimmed.includes("..") ||
+    trimmed.toLowerCase().endsWith(".json")
+  ) {
+    throw new Error(
+      `Invalid session name "${name}". Use letters, digits, dot, underscore or dash (no path separators, no .json suffix).`
+    );
   }
-  return existsSync(DEFAULT_COOKIE_FILE) ? DEFAULT_COOKIE_FILE : null;
+  return trimmed;
+}
+
+function resolveSessionPath(name: string): string {
+  return join(SESSIONS_DIR, `${resolveSessionName(name)}.json`);
+}
+
+function listSessionNames(): string[] {
+  try {
+    return readdirSync(SESSIONS_DIR)
+      .filter((file) => file.endsWith(".json"))
+      .map((file) => file.slice(0, -".json".length))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+function sessionNotFoundError(name: string): Error {
+  const available = listSessionNames();
+  const hint = available.length > 0
+    ? `Available sessions: ${available.join(", ")}.`
+    : `Create one with: redbook auth save --session ${name} --cookie-string "a1=...; web_session=..."`;
+  return new Error(`Session "${name}" not found (${join(SESSIONS_DIR, `${name}.json`)}). ${hint}`);
+}
+
+/** Resolve an auth command argument: a bare name is a session, anything else is a file path. */
+function resolveSessionOrFilePath(arg?: string): string {
+  if (!arg) return resolveCookieFilePath();
+  const looksLikePath =
+    arg.startsWith("~") ||
+    arg.startsWith(".") ||
+    arg.includes("/") ||
+    arg.includes("\\") ||
+    arg.toLowerCase().endsWith(".json");
+  if (!looksLikePath) {
+    let invalidNameError: unknown;
+    try {
+      const sessionPath = resolveSessionPath(arg);
+      if (existsSync(sessionPath)) return sessionPath;
+    } catch (err) {
+      // Not a valid session name — remember why, try path resolution, then report it.
+      invalidNameError = err;
+    }
+    // Legacy behavior: bare file names in the current directory still work.
+    const asPath = resolveCookieFilePath(arg);
+    if (existsSync(asPath)) return asPath;
+    if (invalidNameError) throw invalidNameError;
+    throw sessionNotFoundError(arg);
+  }
+  return resolveCookieFilePath(arg);
+}
+
+/** Resolve the write target for `auth save` / `auth export`. */
+function resolveAuthWriteTarget(session?: string, outputArg?: string, outputOpt?: string): string {
+  if (session !== undefined && !session.trim()) {
+    throw new Error("Session name cannot be empty.");
+  }
+  if (session && (outputArg || outputOpt)) {
+    throw new Error("Use either --session or an output path, not both.");
+  }
+  if (session) return resolveSessionPath(session);
+  return resolveCookieFilePath(outputArg || outputOpt);
+}
+
+interface RedbookConfig {
+  /** Session selected with `redbook auth use <name>`. */
+  defaultSession?: string;
+}
+
+function parseConfig(raw: string): RedbookConfig {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isRecord(parsed)) throw new Error("config must be a JSON object");
+  const value = parsed.defaultSession;
+  if (value === undefined || value === null || value === "") return {};
+  if (typeof value !== "string") throw new Error("defaultSession must be a string");
+  return { defaultSession: value };
+}
+
+/** Lenient read for auth commands (recovery paths must work even if config is broken). */
+function readConfig(): RedbookConfig {
+  try {
+    return parseConfig(readFileSync(CONFIG_FILE, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Strict read for getClient: only a missing file means "no default session".
+ * A malformed/unreadable config must fail loudly — silently falling back to
+ * another account's cookies is the exact hazard this feature prevents.
+ */
+function readConfigForClient(): RedbookConfig {
+  let raw: string;
+  try {
+    raw = readFileSync(CONFIG_FILE, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw new Error(
+      `${CONFIG_FILE} is unreadable (${err instanceof Error ? err.message : String(err)}). ` +
+      `Fix it or run "redbook auth use --clear".`
+    );
+  }
+  try {
+    return parseConfig(raw);
+  } catch (err) {
+    throw new Error(
+      `${CONFIG_FILE} is malformed (${err instanceof Error ? err.message : String(err)}). ` +
+      `Fix it or run "redbook auth use --clear".`
+    );
+  }
+}
+
+function writeConfig(config: RedbookConfig): void {
+  // Preserve unknown keys so `auth use` never destroys forward-compatible fields.
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(readFileSync(CONFIG_FILE, "utf-8")) as unknown;
+    if (isRecord(parsed)) existing = parsed;
+  } catch {
+    // Missing or malformed — start fresh.
+  }
+  const merged = { ...existing };
+  if (config.defaultSession === undefined) delete merged.defaultSession;
+  else merged.defaultSession = config.defaultSession;
+
+  mkdirSync(REDBOOK_DIR, { recursive: true, mode: 0o700 });
+  const tmp = `${CONFIG_FILE}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(merged, null, 2) + "\n", { mode: 0o600 });
+  renameSync(tmp, CONFIG_FILE);
+  try {
+    chmodSync(CONFIG_FILE, 0o600);
+  } catch {
+    // Best effort on platforms/filesystems that do not support POSIX modes.
+  }
+}
+
+/** Clear the configured default session if it points at the given file. */
+function clearDefaultSessionIfActive(removedPath: string): boolean {
+  const current = readConfig().defaultSession;
+  if (!current) return false;
+  let currentPath: string;
+  try {
+    currentPath = resolveSessionPath(current);
+  } catch {
+    return false;
+  }
+  if (currentPath !== removedPath) return false;
+  writeConfig({});
+  return true;
+}
+
+function clientFromSavedFile(saved: LoadedCookieFile, explicitPlatform: string | undefined): XhsClient {
+  const cfg = explicitPlatform
+    ? resolvePlatform(explicitPlatform)
+    : saved.platform
+      ? resolvePlatform(saved.platform)
+      : resolvePlatform();
+  return new XhsClient(saved.cookies, cfg);
 }
 
 function parsePlatformId(value: unknown, source: string): PlatformId | undefined {
@@ -193,7 +373,14 @@ function loadSavedCookieFile(filePath?: string): LoadedCookieFile {
     };
   }
 
-  const parsed = JSON.parse(raw) as unknown;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (err) {
+    throw new Error(
+      `Cookie file is not valid JSON: ${path} (${err instanceof Error ? err.message : String(err)})`
+    );
+  }
   if (!isRecord(parsed)) throw new Error(`Cookie file must be a JSON object: ${path}`);
 
   const platform = parsePlatformId(parsed.platform, `Cookie file ${path}`);
@@ -228,7 +415,16 @@ function loadSavedCookieFile(filePath?: string): LoadedCookieFile {
 function writeSavedCookieFile(filePath: string, cookies: XhsCookies, platform: PlatformId): LoadedCookieFile {
   const path = resolveCookieFilePath(filePath);
   validateCookieMap(cookies, "Cookie data");
-  mkdirSync(dirname(path), { recursive: true });
+  const dir = dirname(path);
+  const dirExisted = existsSync(dir);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (!dirExisted) {
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      // Best effort on platforms/filesystems that do not support POSIX modes.
+    }
+  }
   const createdAt = new Date().toISOString();
   const sortedCookies = Object.fromEntries(
     Object.entries(cookies).sort(([a], [b]) => a.localeCompare(b))
@@ -279,48 +475,131 @@ function optionPlatform(opts: { global?: boolean; platform?: string }): string |
   return opts.global ? "rednote" : opts.platform;
 }
 
-async function getClient(cookieSource: string, chromeProfile?: string, cookieString?: string, platform?: string): Promise<XhsClient> {
+interface CookieOptions {
+  cookieSource?: string;
+  chromeProfile?: string;
+  cookieString?: string;
+  session?: string;
+  cookieFile?: string;
+  platform?: string;
+  global?: boolean;
+}
+
+async function getClient(opts: CookieOptions = {}): Promise<XhsClient> {
+  const cookieSource = opts.cookieSource ?? "chrome";
   // An explicit choice (--platform / --global / REDBOOK_PLATFORM) skips detection.
-  const explicit = platform || process.env.REDBOOK_PLATFORM;
-  const cookieStringInput = cookieString || process.env.REDBOOK_COOKIE_STRING;
+  const explicit = opts.global ? "rednote" : opts.platform || process.env.REDBOOK_PLATFORM;
+  const cookieStringInput = opts.cookieString || process.env.REDBOOK_COOKIE_STRING;
 
   // ── Manual cookie string ──
   if (cookieStringInput) {
     const cookies = parseManualCookies(
       cookieStringInput,
-      cookieString ? "--cookie-string" : "REDBOOK_COOKIE_STRING"
+      opts.cookieString ? "--cookie-string" : "REDBOOK_COOKIE_STRING"
     );
-    console.error(kleur.dim(cookieString ? "Using manual cookie string." : "Using REDBOOK_COOKIE_STRING."));
+    console.error(kleur.dim(opts.cookieString ? "Using manual cookie string." : "Using REDBOOK_COOKIE_STRING."));
     const cfg = explicit ? resolvePlatform(explicit) : await detectPlatformForCookies(cookies);
     return new XhsClient(cookies, cfg);
   }
 
-  // ── Saved cookie file ──
-  const savedCookiePath = defaultCookieFileForRead();
-  if (savedCookiePath) {
+  // ── Named session (~/.redbook/sessions/<name>.json) ──
+  // An empty env var means "unset"; an explicitly passed empty flag is an error.
+  const sessionRaw = opts.session !== undefined
+    ? opts.session
+    : process.env.REDBOOK_SESSION?.trim() || undefined;
+  if (sessionRaw !== undefined) {
+    if (!sessionRaw.trim()) {
+      throw new Error("Session name cannot be empty (--session).");
+    }
+    const sessionName = resolveSessionName(sessionRaw);
+    const sessionPath = resolveSessionPath(sessionName);
+    if (!existsSync(sessionPath)) throw sessionNotFoundError(sessionName);
+    const saved = loadSavedCookieFile(sessionPath);
+    console.error(kleur.dim(`Using session "${sessionName}" (${saved.path})`));
+    return clientFromSavedFile(saved, explicit);
+  }
+
+  // ── Explicit cookie file (--cookie-file / REDBOOK_COOKIE_FILE) ──
+  const cookieFileRaw = opts.cookieFile !== undefined
+    ? opts.cookieFile
+    : process.env.REDBOOK_COOKIE_FILE?.trim() || undefined;
+  if (cookieFileRaw !== undefined && !cookieFileRaw.trim()) {
+    throw new Error("Cookie file path cannot be empty (--cookie-file).");
+  }
+  if (cookieFileRaw !== undefined) {
+    const savedCookiePath = resolveCookieFilePath(cookieFileRaw);
+    if (!existsSync(savedCookiePath)) {
+      throw new Error(`Cookie file not found: ${savedCookiePath}`);
+    }
     const saved = loadSavedCookieFile(savedCookiePath);
-    const cfg = explicit
-      ? resolvePlatform(explicit)
-      : saved.platform
-        ? resolvePlatform(saved.platform)
-        : resolvePlatform();
     console.error(kleur.dim(`Using saved cookie file: ${saved.path}`));
-    return new XhsClient(saved.cookies, cfg);
+    return clientFromSavedFile(saved, explicit);
+  }
+
+  // ── Explicit cookie source (--cookie-source chrome/safari/firefox) ──
+  // Asking for a browser means "read live cookies from it". That has to beat the
+  // saved cookie file, otherwise the flag is silently ignored whenever
+  // ~/.redbook/cookies.json exists and the caller can never reach the live session.
+  // Precedence: --cookie-string > --session/--cookie-file > --cookie-source >
+  // configured default session > saved cookie file > auto-detect.
+  if (opts.cookieSource) {
+    const source = opts.cookieSource as CookieSource;
+    if (explicit) {
+      const cfg = resolvePlatform(explicit);
+      if (cfg.id === "rednote") console.error(kleur.dim("Platform: RedNote (global, rednote.com)."));
+      const cookies = await extractCookies(source, opts.chromeProfile, cfg.cookieUrl);
+      return new XhsClient(cookies, cfg);
+    }
+    const det = await detectPlatform(source, opts.chromeProfile);
+    const cookies = det.cookies
+      ?? await extractCookies(source, opts.chromeProfile, det.platform.cookieUrl);
+    return new XhsClient(cookies, det.platform);
+  }
+
+  // ── Configured default session (`redbook auth use <name>`) ──
+  const configuredSession = readConfigForClient().defaultSession;
+  if (configuredSession) {
+    let sessionName: string;
+    try {
+      sessionName = resolveSessionName(configuredSession);
+    } catch (err) {
+      throw new Error(
+        `Default session in ${CONFIG_FILE} is invalid (${err instanceof Error ? err.message : String(err)}). ` +
+        `Run "redbook auth use --clear" to reset.`
+      );
+    }
+    const sessionPath = resolveSessionPath(sessionName);
+    if (!existsSync(sessionPath)) {
+      throw new Error(
+        `Default session "${sessionName}" (from ${CONFIG_FILE}) not found. ` +
+        `Run "redbook auth use <name>" to switch, or "redbook auth use --clear" to unset.`
+      );
+    }
+    const saved = loadSavedCookieFile(sessionPath);
+    console.error(kleur.dim(`Using default session "${sessionName}" (${saved.path})`));
+    return clientFromSavedFile(saved, explicit);
+  }
+
+  // ── Legacy default cookie file ──
+  if (existsSync(DEFAULT_COOKIE_FILE)) {
+    const saved = loadSavedCookieFile(DEFAULT_COOKIE_FILE);
+    console.error(kleur.dim(`Using saved cookie file: ${saved.path}`));
+    return clientFromSavedFile(saved, explicit);
   }
 
   // ── Explicit platform ──
   if (explicit) {
     const cfg = resolvePlatform(explicit);
     if (cfg.id === "rednote") console.error(kleur.dim("Platform: RedNote (global, rednote.com)."));
-    const cookies = await extractCookies(cookieSource as CookieSource, chromeProfile, cfg.cookieUrl);
+    const cookies = await extractCookies(cookieSource as CookieSource, opts.chromeProfile, cfg.cookieUrl);
     return new XhsClient(cookies, cfg);
   }
 
   // ── Auto-detect (default): find whichever of xiaohongshu.com / rednote.com
   //    the user is actually logged into. ──
-  const det = await detectPlatform(cookieSource as CookieSource, chromeProfile);
+  const det = await detectPlatform(cookieSource as CookieSource, opts.chromeProfile);
   const cookies = det.cookies
-    ?? await extractCookies(cookieSource as CookieSource, chromeProfile, det.platform.cookieUrl);
+    ?? await extractCookies(cookieSource as CookieSource, opts.chromeProfile, det.platform.cookieUrl);
   return new XhsClient(cookies, det.platform);
 }
 
@@ -354,7 +633,7 @@ addJsonOption(whoamiCmd);
 
 whoamiCmd.action(async (opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const info = await client.getSelfInfo();
     if (opts.json) {
       output(info, true);
@@ -382,9 +661,272 @@ const authPathCmd = authCmd
 addJsonOption(authPathCmd);
 
 authPathCmd.action((opts) => {
-  const data = { path: resolveCookieFilePath() };
+  const data = { path: resolveCookieFilePath(), sessionsDir: SESSIONS_DIR, configFile: CONFIG_FILE };
   if (opts.json) output(data, true);
   else console.log(data.path);
+});
+
+const authUseCmd = authCmd
+  .command("use [name]")
+  .description("Switch the default session used when --session is not passed")
+  .option("--clear", "Unset the default session");
+addJsonOption(authUseCmd);
+
+authUseCmd.action((name: string | undefined, opts) => {
+  try {
+    if (opts.clear && name !== undefined) {
+      throw new Error("Use either a session name or --clear, not both.");
+    }
+    if (opts.clear) {
+      // Always rewrite an existing config file — this is also the repair path for malformed configs.
+      if (existsSync(CONFIG_FILE)) writeConfig({});
+      if (opts.json) output({ defaultSession: null }, true);
+      else console.log(kleur.green("Default session cleared. Commands fall back to the saved cookie file / browser."));
+      return;
+    }
+    if (name !== undefined && !name.trim()) {
+      throw new Error("Session name cannot be empty.");
+    }
+    if (name === undefined) {
+      const current = readConfig().defaultSession ?? null;
+      const available = listSessionNames();
+      if (opts.json) {
+        output({ defaultSession: current, sessions: available }, true);
+        return;
+      }
+      if (current) console.log(`Default session: ${kleur.bold(current)}`);
+      else console.log(kleur.dim("No default session set — commands use the saved cookie file / browser unless --session is passed."));
+      console.log(kleur.dim(`Available sessions: ${available.join(", ") || "(none)"}`));
+      return;
+    }
+    const sessionName = resolveSessionName(name);
+    const sessionPath = resolveSessionPath(sessionName);
+    if (!existsSync(sessionPath)) throw sessionNotFoundError(sessionName);
+    try {
+      loadSavedCookieFile(sessionPath);
+    } catch (err) {
+      throw new Error(
+        `Session "${sessionName}" is not usable (${err instanceof Error ? err.message : String(err)}).`
+      );
+    }
+    writeConfig({ defaultSession: sessionName });
+    if (opts.json) {
+      output({ defaultSession: sessionName, path: sessionPath }, true);
+    } else {
+      console.log(kleur.green(`Switched to session "${sessionName}"`));
+      console.log(kleur.dim(`Commands without --session now use ${sessionPath}.`));
+    }
+  } catch (err) {
+    handleError(err);
+  }
+});
+
+interface ProfileScanEntry {
+  dirName: string;
+  displayName: string;
+  hasSession: boolean;
+  verified: boolean;
+  platform?: PlatformId;
+  sessionName: string;
+  isDefault: boolean;
+  account?: {
+    nickname: string;
+    redId?: string;
+    userId?: string;
+  };
+  verifyError?: string;
+  imported?: "created" | "overwritten";
+}
+
+function sessionNameForProfile(dirName: string): string {
+  const slug = dirName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return `chrome-${slug || "profile"}`;
+}
+
+interface ProfileScanResult {
+  entries: ProfileScanEntry[];
+  /** Cookies keyed by profile dir name — never included in scan output. */
+  cookies: Map<string, XhsCookies>;
+}
+
+/** Guest sessions are not logins; their web_session usually starts with "03". */
+function looksLikeGuestSession(cookies: XhsCookies): boolean {
+  return /^03/.test(cookies.web_session ?? "");
+}
+
+interface PlatformCandidate {
+  platform: PlatformId;
+  cookies: XhsCookies;
+}
+
+/**
+ * Probe both backends for one Chrome profile. The unused domain often keeps a
+ * stale guest cookie, so candidates are ordered with the likely-authenticated
+ * (non-guest) one first.
+ */
+async function probeProfileCandidates(dirName: string): Promise<PlatformCandidate[]> {
+  const candidates: PlatformCandidate[] = [];
+  const xhsCookies = await probeCookies("chrome", dirName, PLATFORMS.xhs.cookieUrl);
+  if (xhsCookies) candidates.push({ platform: "xhs", cookies: xhsCookies });
+  const rednoteCookies = await probeCookies("chrome", dirName, PLATFORMS.rednote.cookieUrl);
+  if (rednoteCookies) candidates.push({ platform: "rednote", cookies: rednoteCookies });
+  candidates.sort(
+    (a, b) => Number(looksLikeGuestSession(a.cookies)) - Number(looksLikeGuestSession(b.cookies))
+  );
+  return candidates;
+}
+
+async function scanChromeProfiles(verify: boolean): Promise<ProfileScanResult> {
+  const defaultSession = readConfig().defaultSession;
+  const result: ProfileScanResult = { entries: [], cookies: new Map() };
+  const usedNames = new Map<string, number>();
+
+  for (const profile of listChromeProfiles()) {
+    const baseName = sessionNameForProfile(profile.dirName);
+    const seen = usedNames.get(baseName) ?? 0;
+    usedNames.set(baseName, seen + 1);
+    const sessionName = seen === 0 ? baseName : `${baseName}-${seen + 1}`;
+
+    const entry: ProfileScanEntry = {
+      dirName: profile.dirName,
+      displayName: profile.displayName,
+      hasSession: false,
+      verified: false,
+      sessionName,
+      isDefault: sessionName === defaultSession,
+    };
+
+    console.error(kleur.dim(`  Checking "${profile.dirName}"...`));
+    const candidates = await probeProfileCandidates(profile.dirName);
+    if (candidates.length === 0) {
+      result.entries.push(entry);
+      continue;
+    }
+
+    entry.hasSession = true;
+    entry.platform = candidates[0].platform;
+    result.cookies.set(profile.dirName, candidates[0].cookies);
+
+    if (verify) {
+      let lastError: unknown;
+      for (const candidate of candidates) {
+        try {
+          const me = (await new XhsClient(candidate.cookies, resolvePlatform(candidate.platform)).getSelfInfo()) as Record<string, unknown>;
+          if (me.guest !== false) {
+            throw new Error("guest session (not logged in)");
+          }
+          entry.platform = candidate.platform;
+          entry.verified = true;
+          entry.account = {
+            nickname: String(me.nickname ?? me.nick_name ?? "?"),
+            redId: me.red_id ? String(me.red_id) : undefined,
+            userId: me.user_id ? String(me.user_id) : undefined,
+          };
+          result.cookies.set(profile.dirName, candidate.cookies);
+          break;
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      if (!entry.verified) {
+        entry.verifyError = lastError instanceof Error ? lastError.message : String(lastError ?? "verification failed");
+      }
+    }
+
+    result.entries.push(entry);
+  }
+
+  return result;
+}
+
+const SCAN_OPTIONS_HINT =
+  "Scan options: --import (save found sessions as chrome-<profile>) · --offline (skip account identification, no API calls) · --force (with --import, include unverified) · --json (machine-readable)";
+
+const authScanCmd = authCmd
+  .command("scan")
+  .description("Scan all Chrome profiles for Xiaohongshu sessions and identify the accounts")
+  .option("--import", "Save each found profile as a session (chrome-<profile>)")
+  .option("--offline", "Skip account identification (no API calls)")
+  .option("--force", "With --import: also import sessions that could not be verified")
+  .option("--cookie-source <browser>", "Browser to scan (only 'chrome' is supported)", "chrome");
+addJsonOption(authScanCmd);
+
+authScanCmd.action(async (opts) => {
+  try {
+    const source = (opts.cookieSource ?? "chrome") as CookieSource;
+    if (source !== "chrome") {
+      throw new Error(
+        "auth scan supports the chrome source only. For other browsers: redbook auth export --cookie-source <browser> --session <name>"
+      );
+    }
+
+    const verify = !opts.offline;
+    console.error(kleur.dim(verify ? "Scanning Chrome profiles..." : "Scanning Chrome profiles (offline — accounts not resolved)..."));
+
+    const result = await scanChromeProfiles(verify);
+
+    let skippedUnverified = 0;
+    if (opts.import) {
+      for (const entry of result.entries) {
+        if (!entry.hasSession || !entry.platform) continue;
+        if (entry.verifyError && !opts.force) {
+          skippedUnverified++;
+          continue;
+        }
+        const cookies = result.cookies.get(entry.dirName);
+        if (!cookies) continue;
+        const sessionPath = resolveSessionPath(entry.sessionName);
+        const existed = existsSync(sessionPath);
+        writeSavedCookieFile(sessionPath, cookies, entry.platform);
+        entry.imported = existed ? "overwritten" : "created";
+      }
+    }
+
+    if (opts.json) {
+      output({ source: "chrome", verified: verify, profiles: result.entries }, true);
+      return;
+    }
+
+    if (result.entries.length === 0) {
+      console.log(kleur.yellow("No Chrome profiles found (is Chrome installed?)."));
+      console.log(kleur.dim(SCAN_OPTIONS_HINT));
+      return;
+    }
+
+    for (const entry of result.entries) {
+      const label = `${entry.dirName} (${entry.displayName})`;
+      if (!entry.hasSession) {
+        console.log(`  ${kleur.dim("✗")} ${label}  ${kleur.dim("no Xiaohongshu session")}`);
+        continue;
+      }
+      const account = entry.account
+        ? `${entry.account.nickname}${entry.account.redId ? `  RedID ${entry.account.redId}` : ""}`
+        : entry.verifyError
+          ? kleur.yellow(`unverified (${entry.verifyError})`)
+          : kleur.dim("not verified");
+      const importedSuffix = entry.imported
+        ? kleur.green(`  → session "${entry.sessionName}" ${entry.imported}`)
+        : `  → ${entry.sessionName}`;
+      const defaultSuffix = entry.isDefault ? kleur.cyan("  ← default") : "";
+      console.log(`  ${kleur.green("✓")} ${label}  ${kleur.cyan(entry.platform ?? "?")}  ${account}${importedSuffix}${defaultSuffix}`);
+    }
+
+    const found = result.entries.filter((entry) => entry.hasSession).length;
+    console.log(kleur.dim(`\n${found} of ${result.entries.length} profile(s) have a Xiaohongshu session.`));
+    if (skippedUnverified > 0) {
+      console.log(kleur.yellow(`${skippedUnverified} unverified session(s) skipped — re-run with --force to import them anyway.`));
+    }
+    if (!opts.import && found > 0) {
+      console.log(kleur.dim("Save them as sessions: redbook auth scan --import"));
+    }
+    if (process.platform === "win32") {
+      console.log(kleur.dim('Windows: if a logged-in profile shows no session, Chrome 127+ app-bound encryption may block reads — try: redbook auth export --session <name> --chrome-profile "<dir>"'));
+    }
+    console.log(kleur.dim('If a logged-in profile is missing, try: redbook auth export --session <name> --chrome-profile "<dir>"'));
+    console.log(kleur.dim(SCAN_OPTIONS_HINT));
+  } catch (err) {
+    handleError(err);
+  }
 });
 
 const authSaveCmd = authCmd
@@ -395,6 +937,7 @@ const authSaveCmd = authCmd
     'Cookie string from Chrome DevTools, e.g. "a1=VALUE; web_session=VALUE"'
   )
   .option("--output <path>", "Cookie file to write (default: ~/.redbook/cookies.json)")
+  .option("--session <name>", "Save as a named session (~/.redbook/sessions/<name>.json)")
   .option(
     "--platform <name>",
     "Cookie backend: 'xhs' (mainland xiaohongshu.com) or 'rednote' (global rednote.com)",
@@ -405,9 +948,10 @@ addJsonOption(authSaveCmd);
 
 authSaveCmd.action((opts) => {
   try {
+    const target = resolveAuthWriteTarget(opts.session, undefined, opts.output);
     const cfg = resolvePlatform(optionPlatform(opts));
     const cookies = parseManualCookies(opts.cookieString, "--cookie-string");
-    const saved = writeSavedCookieFile(resolveCookieFilePath(opts.output), cookies, cfg.id);
+    const saved = writeSavedCookieFile(target, cookies, cfg.id);
     const summary = summarizeCookieFile(saved);
     if (opts.json) output(summary, true);
     else printCookieSummary(summary, "Saved cookie file");
@@ -420,6 +964,7 @@ const authExportCmd = authCmd
   .command("export [output]")
   .description("Export browser cookies to a reusable cookie file")
   .option("--output <path>", "Cookie file to write (default: ~/.redbook/cookies.json)")
+  .option("--session <name>", "Save as a named session (~/.redbook/sessions/<name>.json)")
   .option(
     "--cookie-source <browser>",
     "Browser to read cookies from (chrome, safari, firefox)",
@@ -438,6 +983,7 @@ addJsonOption(authExportCmd);
 
 authExportCmd.action(async (outputPath: string | undefined, opts) => {
   try {
+    const target = resolveAuthWriteTarget(opts.session, outputPath, opts.output);
     const explicit = optionPlatform(opts);
     const source = opts.cookieSource as CookieSource;
     const cfg = explicit ? resolvePlatform(explicit) : undefined;
@@ -448,7 +994,7 @@ authExportCmd.action(async (outputPath: string | undefined, opts) => {
       opts.chromeProfile,
       platform.cookieUrl
     );
-    const saved = writeSavedCookieFile(resolveCookieFilePath(outputPath || opts.output), cookies, platform.id);
+    const saved = writeSavedCookieFile(target, cookies, platform.id);
     const summary = summarizeCookieFile(saved);
     if (opts.json) output(summary, true);
     else printCookieSummary(summary, "Exported cookie file");
@@ -457,14 +1003,106 @@ authExportCmd.action(async (outputPath: string | undefined, opts) => {
   }
 });
 
+interface SessionListEntry {
+  name: string;
+  path: string;
+  platform?: PlatformId;
+  createdAt?: string;
+  keyCount?: number;
+  hasA1?: boolean;
+  hasWebSession?: boolean;
+  error?: string;
+}
+
+function describeCookieFile(name: string, path: string): SessionListEntry {
+  try {
+    const summary = summarizeCookieFile(loadSavedCookieFile(path));
+    return {
+      name,
+      path,
+      platform: summary.platform ?? undefined,
+      createdAt: summary.createdAt ?? undefined,
+      keyCount: summary.keyCount,
+      hasA1: summary.hasA1,
+      hasWebSession: summary.hasWebSession,
+    };
+  } catch (err) {
+    return { name, path, error: err instanceof Error ? err.message : "unreadable" };
+  }
+}
+
+const authListCmd = authCmd
+  .command("list")
+  .description("List saved sessions and the default cookie file");
+addJsonOption(authListCmd);
+
+authListCmd.action((opts) => {
+  const entries: SessionListEntry[] = listSessionNames().map((name) =>
+    describeCookieFile(name, join(SESSIONS_DIR, `${name}.json`))
+  );
+
+  const defaultSession = readConfig().defaultSession ?? null;
+
+  const envCookieFile = process.env.REDBOOK_COOKIE_FILE;
+  const defaultPath = envCookieFile ? resolveCookieFilePath(envCookieFile) : DEFAULT_COOKIE_FILE;
+  const defaultFile = existsSync(defaultPath)
+    ? describeCookieFile(envCookieFile ? "(REDBOOK_COOKIE_FILE)" : "(default)", defaultPath)
+    : null;
+
+  const defaultEntry = defaultSession
+    ? entries.find((entry) => entry.name === defaultSession)
+    : undefined;
+  const defaultSessionMissing = Boolean(defaultSession && !defaultEntry);
+  const defaultSessionUnreadable = Boolean(defaultEntry?.error);
+
+  if (opts.json) {
+    output({
+      sessionsDir: SESSIONS_DIR,
+      configFile: CONFIG_FILE,
+      defaultSession,
+      defaultSessionMissing,
+      defaultSessionUnreadable,
+      sessions: entries,
+      defaultFile,
+    }, true);
+    return;
+  }
+
+  if (entries.length === 0) {
+    console.log(kleur.dim(`No sessions yet (${SESSIONS_DIR}).`));
+    console.log(kleur.dim('Create one: redbook auth save --session <name> --cookie-string "a1=...; web_session=..."'));
+  } else {
+    for (const entry of entries) {
+      console.log(`  ${kleur.bold(entry.name)}  ${kleur.dim(entry.path)}${entry.name === defaultSession ? kleur.cyan("  ← default") : ""}`);
+      console.log(
+        entry.error
+          ? kleur.red(`    ${entry.error}`)
+          : kleur.dim(
+              `    ${entry.platform ?? "?"} · ${entry.keyCount} keys · a1:${entry.hasA1 ? "✓" : "✗"} web_session:${entry.hasWebSession ? "✓" : "✗"}${entry.createdAt ? ` · ${entry.createdAt}` : ""}`
+            )
+      );
+    }
+  }
+  if (defaultFile) {
+    console.log(kleur.dim(`\n${defaultFile.name === "(default)" ? "Default cookie file" : "REDBOOK_COOKIE_FILE"}: ${defaultFile.path} (${defaultFile.platform ?? "?"})`));
+    if (defaultFile.error) console.log(kleur.red(`  ${defaultFile.error}`));
+  }
+  if (defaultSessionMissing) {
+    console.log(kleur.yellow(`\n⚠ Default session "${defaultSession}" is missing — run redbook auth use --clear`));
+  } else if (defaultSessionUnreadable) {
+    console.log(kleur.yellow(`\n⚠ Default session "${defaultSession}" is unreadable — run redbook auth use --clear`));
+  }
+  console.log(kleur.dim(`\nSwitch default: redbook auth use <name>   ·   one-off override: redbook <command> --session <name>`));
+});
+
 const authInspectCmd = authCmd
-  .command("inspect [file]")
-  .description("Inspect a saved cookie file without printing secret values");
+  .command("inspect [session-or-file]")
+  .description("Inspect a saved session or cookie file without printing secret values");
 addJsonOption(authInspectCmd);
 
 authInspectCmd.action((file: string | undefined, opts) => {
   try {
-    const summary = summarizeCookieFile(loadSavedCookieFile(file));
+    const summary = summarizeCookieFile(loadSavedCookieFile(resolveSessionOrFilePath(file)));
     if (opts.json) output(summary, true);
     else printCookieSummary(summary, "Cookie file");
   } catch (err) {
@@ -473,18 +1111,25 @@ authInspectCmd.action((file: string | undefined, opts) => {
 });
 
 const authClearCmd = authCmd
-  .command("clear [file]")
-  .description("Remove a saved cookie file");
+  .command("clear [session-or-file]")
+  .description("Remove a saved session or cookie file");
 addJsonOption(authClearCmd);
 
 authClearCmd.action((file: string | undefined, opts) => {
   try {
-    const path = resolveCookieFilePath(file);
+    const path = resolveSessionOrFilePath(file);
     const existed = existsSync(path);
+    // Clear the pointer first so a failed unlink never leaves a dangling default.
+    const removedWasDefault = existed ? clearDefaultSessionIfActive(path) : false;
     if (existed) unlinkSync(path);
-    const result = { path, removed: existed };
+    const result = { path, removed: existed, clearedDefaultSession: removedWasDefault };
     if (opts.json) output(result, true);
-    else console.log(existed ? kleur.green(`Removed: ${path}`) : kleur.yellow(`Not found: ${path}`));
+    else {
+      console.log(existed ? kleur.green(`Removed: ${path}`) : kleur.yellow(`Not found: ${path}`));
+      if (removedWasDefault) {
+        console.log(kleur.yellow("That session was the default — cleared. Pick another with redbook auth use <name>."));
+      }
+    }
   } catch (err) {
     handleError(err);
   }
@@ -503,7 +1148,7 @@ addJsonOption(searchCmd);
 
 searchCmd.action(async (keyword, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const sortMap: Record<string, "general" | "popularity_descending" | "time_descending"> = {
       general: "general",
       popular: "popularity_descending",
@@ -557,7 +1202,7 @@ addJsonOption(readCmd);
 
 readCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const { noteId, xsecToken } = parseNoteUrl(url);
 
     let result: unknown;
@@ -628,7 +1273,7 @@ addJsonOption(commentsCmd);
 
 commentsCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const { noteId, xsecToken } = parseNoteUrl(url);
 
     const allComments: unknown[] = [];
@@ -676,7 +1321,7 @@ addUserPageOptions(userCmd);
 
 userCmd.action(async (userArg, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const user = parseUserProfileArg(userArg, opts);
     const info = await client.getUserInfo(user.userId, user);
     output(info, opts.json ?? false);
@@ -699,7 +1344,7 @@ userPostsCmd.option("--delay <ms>", "Delay in ms between page fetches (default: 
 
 userPostsCmd.action(async (userArg, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const user = parseUserProfileArg(userArg, opts);
 
     if (opts.all) {
@@ -783,7 +1428,7 @@ accountReportCmd.action(async (users: string[] | undefined, opts) => {
     const maxPages = opts.all
       ? Number.POSITIVE_INFINITY
       : Math.max(1, parseInt(opts.maxPages ?? "1", 10) || 1);
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const reports: AccountReport[] = [];
     const errors: Array<{ input: string; userId?: string; error: string }> = [];
 
@@ -836,7 +1481,7 @@ addJsonOption(feedCmd);
 
 feedCmd.action(async (opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const result = await client.getHomeFeed(opts.category);
     enrichWithWebUrl(result, "pc_feed");
     output(result, opts.json ?? false);
@@ -860,7 +1505,7 @@ addJsonOption(postCmd);
 
 postCmd.action(async (opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const imageFiles: string[] = opts.images ?? [];
 
     if (imageFiles.length === 0) {
@@ -934,7 +1579,7 @@ addJsonOption(topicsCmd);
 
 topicsCmd.action(async (keyword, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const result = await client.searchTopics(keyword);
     if (opts.json) {
       output(result, true);
@@ -963,7 +1608,7 @@ addJsonOption(favoritesCmd);
 
 favoritesCmd.action(async (userId, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
 
     if (!userId) {
       const me = (await client.getSelfInfo()) as Record<string, unknown>;
@@ -1021,7 +1666,7 @@ addJsonOption(collectCmd);
 
 collectCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const { noteId } = parseNoteUrl(url);
     const result = await client.collectNote(noteId);
     if (opts.json) {
@@ -1044,7 +1689,7 @@ addJsonOption(uncollectCmd);
 
 uncollectCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const { noteId } = parseNoteUrl(url);
     const result = await client.uncollectNote(noteId);
     if (opts.json) {
@@ -1068,7 +1713,7 @@ addJsonOption(likeCmd);
 
 likeCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const { noteId } = parseNoteUrl(url);
     if (opts.undo) {
       const result = await client.unlikeNote(noteId);
@@ -1093,7 +1738,7 @@ addJsonOption(followersCmd);
 
 followersCmd.action(async (userId, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const allUsers: unknown[] = [];
     let cursor = "";
     let hasMore = true;
@@ -1136,7 +1781,7 @@ addJsonOption(followingCmd);
 
 followingCmd.action(async (userId, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const allUsers: unknown[] = [];
     let cursor = "";
     let hasMore = true;
@@ -1178,7 +1823,7 @@ addJsonOption(deleteCmd);
 
 deleteCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const { noteId } = parseNoteUrl(url);
     const result = await client.deleteNote(noteId);
     if (opts.json) {
@@ -1201,7 +1846,7 @@ addJsonOption(boardsCmd);
 
 boardsCmd.action(async (userId, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     let uid = userId;
     if (!uid) {
       const me = (await client.getSelfInfo()) as Record<string, string>;
@@ -1239,7 +1884,7 @@ addJsonOption(boardCmd);
 
 boardCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const boardId = parseBoardUrl(url);
 
     console.error(kleur.dim(`Fetching board ${boardId}...`));
@@ -1324,7 +1969,7 @@ addJsonOption(healthCmd);
 
 healthCmd.action(async (opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
 
     // Fetch notes from creator backend (v2 endpoint returns hidden level field)
     console.error(kleur.dim("Fetching notes from creator backend..."));
@@ -1416,7 +2061,7 @@ addJsonOption(analyzeViralCmd);
 
 analyzeViralCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const { noteId, xsecToken } = parseNoteUrl(url);
 
     // 1. Fetch the note (same pattern as `read` — prefer HTML, API when xsec_token present)
@@ -1537,7 +2182,7 @@ viralTemplateCmd.action(async (urls: string[], opts) => {
       return;
     }
 
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const commentPages = Math.min(parseInt(opts.commentPages) || 3, 10);
     const analyses = [];
 
@@ -1647,7 +2292,7 @@ addJsonOption(commentCmd);
 
 commentCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const { noteId } = parseNoteUrl(url);
     const result = await client.postComment(noteId, opts.content);
     if (opts.json) {
@@ -1673,7 +2318,7 @@ addJsonOption(replyCmd);
 
 replyCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const { noteId } = parseNoteUrl(url);
     const result = await client.replyComment(noteId, opts.commentId, opts.content);
     if (opts.json) {
@@ -1702,7 +2347,7 @@ addJsonOption(batchReplyCmd);
 
 batchReplyCmd.action(async (url, opts) => {
   try {
-    const client = await getClient(opts.cookieSource, opts.chromeProfile, opts.cookieString, opts.global ? "rednote" : opts.platform);
+    const client = await getClient(opts);
     const { noteId, xsecToken } = parseNoteUrl(url);
     const strategy = opts.strategy as StrategyName;
     const max = Math.min(parseInt(opts.max) || 10, MAX_REPLIES_HARD_CAP);
